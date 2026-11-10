@@ -31,7 +31,7 @@ if ($null -eq $Backend) {
     $SourceDir = Join-Path $ProjectRoot 'backend\src'
     $Process = Start-Process -FilePath 'python' -ArgumentList @(
         '-m', 'uvicorn', 'iron_bottom_sound.api:app', '--app-dir', ('"' + $SourceDir + '"'),
-        '--host', '127.0.0.1', '--port', '8000', '--reload', '--reload-dir', ('"' + $SourceDir + '"')
+        '--host', '0.0.0.0', '--port', '8000', '--reload', '--reload-dir', ('"' + $SourceDir + '"')
     ) -WorkingDirectory $ProjectRoot -RedirectStandardOutput (Join-Path $RuntimeDir 'backend.log') -RedirectStandardError (Join-Path $RuntimeDir 'backend-error.log') -WindowStyle Hidden -PassThru
     $Backend = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.Id)"
     Save-GameProcesses $Backend $Frontend
@@ -41,7 +41,7 @@ if ($null -eq $Frontend) {
     $NodePath = if ($Node) { $Node.Source } else { Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' }
     if (-not (Test-Path -LiteralPath $NodePath)) { throw 'Node.js not found. Install Node.js 20+.' }
     $Process = Start-Process -FilePath $NodePath -ArgumentList @(
-        'node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5173', '--strictPort'
+        'node_modules/vite/bin/vite.js', '--host', '0.0.0.0', '--port', '5173', '--strictPort'
     ) -WorkingDirectory (Join-Path $ProjectRoot 'frontend') -RedirectStandardOutput (Join-Path $RuntimeDir 'frontend.log') -RedirectStandardError (Join-Path $RuntimeDir 'frontend-error.log') -WindowStyle Hidden -PassThru
     $Frontend = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.Id)"
     Save-GameProcesses $Backend $Frontend

@@ -192,6 +192,7 @@ const orderPhases = new Set([
   "torpedo_planning",
   "gunnery",
 ]);
+const LAN_MODE = new URLSearchParams(window.location.search).get("lan") === "1";
 const ACTIVE_GAME_KEY = "ibs.active-game.v1";
 
 function explainError(error: unknown) {
@@ -711,6 +712,23 @@ export default function App() {
       return [];
     }
   }, [draft, side, view]);
+  useEffect(() => {
+    if (!LAN_MODE || !game || reportMode) return;
+    let alive = true;
+    const timer = window.setInterval(() => {
+      viewGame(game, side, false).then((next) => {
+        if (!alive) return;
+        setView((old) => {
+          if (!old || old.phase !== next.phase || old.turn !== next.turn ||
+              old.own_orders_submitted !== next.own_orders_submitted ||
+              old.both_orders_submitted !== next.both_orders_submitted) return next;
+          return old;
+        });
+      }).catch(() => {});
+    }, 1800);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [game, side, reportMode]);
+
   const start = async (
     scenario_id: string,
     nextMode: "hotseat" | "tutorial" | "vs_ai" | "llm" = "hotseat",
@@ -822,6 +840,7 @@ export default function App() {
     window.history.replaceState({}, "", window.location.pathname);
   };
   const toggleDebug = async () => {
+    if (LAN_MODE) return; // 联机模式不提供调试视图
     const next = !debug;
     setDebug(next);
     if(!next)setAiDebugOpen(false);
@@ -899,6 +918,16 @@ export default function App() {
     if (!game || !view || acting) return;
     setActing(true);
     try {
+    if (LAN_MODE) {
+      // 联机模式：只提交本方命令，服务器自动协调双方封存及阶段推进。
+      // 不调用 handoff，不在客户端主动 advance，不切换阵营。
+      if (orderPhases.has(view.phase) && !view.own_orders_submitted) {
+        await submitOrders(game, side, JSON.parse(draft));
+      }
+      await refresh(game, side);
+      setError("");
+      return;
+    }
       if (orderPhases.has(view.phase)) {
         const result = view.own_orders_submitted
           ? { both_submitted: view.both_orders_submitted }
@@ -952,6 +981,7 @@ export default function App() {
     }
   };
   const unlock = async () => {
+    if (LAN_MODE) return; // 联机模式不能切换阵营
     if (!game) return;
     const next: Side = side === "axis" ? "allies" : "axis";
     setSide(next);

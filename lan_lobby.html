@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>铁底湾 IV · 联机准备大厅</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,'Microsoft YaHei',sans-serif;background:#0b1724;color:#eff6fc}
+*{box-sizing:border-box}body{margin:0;padding:24px 18px 70px}
+main{max-width:1050px;margin:auto}header{display:flex;gap:15px;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:1.7rem;margin:0}small,.hint{color:#9fb1c3}p{line-height:1.55}a{color:#79cbff}
+.card{background:#142638;border:1px solid #34485c;border-radius:12px;padding:19px;margin-bottom:18px}
+.columns{display:grid;grid-template-columns:1.15fr 1fr;gap:18px}@media(max-width:760px){.columns{grid-template-columns:1fr}}
+label{display:block;margin:12px 0 6px;font-weight:600}select,input[type=number],input[type=text]{width:100%;background:#0b1724;border:1px solid #617289;border-radius:7px;color:#fff;padding:10px;font:inherit}
+fieldset{border:1px solid #334a60;border-radius:8px;margin:14px 0;padding:10px 16px}legend{padding:0 6px}
+.rules{display:grid;grid-template-columns:1fr 1fr;gap:8px}@media(max-width:520px){.rules{grid-template-columns:1fr}}
+.check{display:flex;gap:8px;align-items:center;font-weight:400;margin:0;padding:7px 0}.check input{width:17px;height:17px}
+button,.buttonlink{display:inline-block;border:1px solid #477d9f;color:white;padding:10px 15px;border-radius:8px;background:#1d5981;cursor:pointer;font:600 15px system-ui,'Microsoft YaHei',sans-serif;text-decoration:none;margin:4px 5px 4px 0}
+button.secondary,.buttonlink.secondary{background:#23384b}button:disabled{opacity:.4;cursor:default}
+.statusline{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}.state{padding:8px 12px;border:1px solid #46596f;border-radius:7px;background:#0b1724}
+.notice{padding:11px 14px;border-radius:8px;background:#263c4f;margin:12px 0;border:1px solid #49647b}.danger{background:#4a2431;border-color:#9b4d5d}.good{background:#1c4539;border-color:#408a74}
+#briefing{line-height:1.6;white-space:pre-line;color:#d5e3ec;max-height:350px;overflow:auto}#error{white-space:pre-wrap}#dirty{color:#ffcd83}
+</style>
+</head>
+<body>
+<main>
+<header><div><h1>铁底湾的回响 IV · 双人联机准备大厅</h1><small>共享剧本与规则 · 双方确认后统一开局</small></div><div id="identity">连接中……</div></header>
+<div id="error" class="notice danger" hidden></div>
+<div class="card">
+<strong>联机状态</strong>
+<div class="statusline"><span class="state" id="axisReady">轴心国：未准备</span><span class="state" id="alliesReady">同盟国：未准备</span><span class="state" id="revision">配置版本：—</span></div>
+<p class="hint" id="progress">正在读取房间……</p>
+<div id="activeGame" hidden><p>当前已有一场对局。可以继续游玩，或者双方在本大厅共同确认配置后新开一局。原对局存档不会删除。</p><a class="buttonlink secondary" id="resume" href="#">进入当前对局</a></div>
+</div>
+<div class="columns"><section class="card">
+<h2>一、选择剧本与规则</h2>
+<p class="hint">以下配置使用原游戏的场景 ID 与 GameOptions 字段；仅支持人类对战（hotseat），不在联机房间中启动 AI 对手。</p>
+<label for="scenario">剧本</label><select id="scenario"><option>读取原版剧本列表……</option></select>
+<label for="seed">随机种子</label><input id="seed" type="number" min="0" max="2147483647" step="1" value="1" />
+<fieldset><legend>原版夜战可选规则</legend><div id="ruleFields" class="rules"></div></fieldset>
+<fieldset><legend>扩展设置</legend>
+<label class="check"><input id="radarVariant" type="checkbox"/>1942 年雷达变体</label>
+<label class="check"><input id="realisticCommand" type="checkbox"/>真实编队指挥模式（剧本需支持）</label>
+<label class="check"><input id="battleReport" type="checkbox"/>生成战报（可能占用更多磁盘）</label>
+<label for="squalls">风暴坐标（启用风暴规则后可填写）</label>
+<input id="squalls" type="text" placeholder="例如 A12,B13；最多 32 个"/>
+</fieldset>
+<div id="dirty" hidden>配置尚未保存。保存后会清除双方原有“准备”状态。</div>
+<button id="save">保存并同步规则</button><button class="secondary" id="reload">撤销本地修改 / 读取最新</button>
+</section><section class="card">
+<h2>二、剧本简报与确认</h2>
+<label>当前所选剧本的原版简介</label><div id="briefing">读取中……</div>
+<hr style="border:0;border-top:1px solid #345; margin:23px 0" />
+<p><strong>准备状态以服务器保存的规则为准。</strong> 修改规则将自动取消两名玩家的准备状态。</p>
+<button id="ready" disabled>我已确认，准备完毕</button>
+<p class="hint" id="readyHint">对方也确认后，服务器会创建对局。不会通过客户端直接开放原版 /games 接口。</p>
+</section></div>
+<div class="card"><strong>使用说明</strong><p>双方必须在各自电脑上使用对应阵营邀请链接。主机和客机共用一个房间；旧对局可以继续，只有双方再次点击准备才会创建新局。如果不同意当前规则，可以先修改并保存，另一方会自动收到新配置。</p>
+<a href="/lan/control">查看回合推进状态</a></div>
+</main>
+<script>
+'use strict';
+const labels={hidden_contacts:'隐藏接触',radar:'雷达',star_shells:'照明弹',searchlights:'探照灯',malfunction_66:'武器故障 66',squalls:'风暴',smoke:'烟幕',silhouettes:'舰影辨识',hidden_damage:'隐藏损伤',blind_torpedoes:'盲射鱼雷'};
+const $=id=>document.getElementById(id);let state=null,dirty=false,scenarios=[],firstGameSet=false,originalGame=null,polling=false;
+function warning(message){$('error').hidden=!message;$('error').textContent=message||''}
+function markDirty(){dirty=true;$('dirty').hidden=false;$('ready').disabled=true}
+for(const [id,label] of Object.entries(labels)){
+ const node=document.createElement('label');node.className='check';
+ const c=document.createElement('input');c.type='checkbox';c.dataset.rule=id;c.addEventListener('change',markDirty);
+ node.append(c,document.createTextNode(label));$('ruleFields').append(node);
+}
+for(const id of ['scenario','seed','radarVariant','realisticCommand','battleReport','squalls']){
+ $(id).addEventListener('change',markDirty);
+}
+$('scenario').addEventListener('change',()=>loadBriefing($('scenario').value));
+function fill(cfg){
+ $('scenario').value=cfg.scenario_id;$('seed').value=cfg.seed;
+ for(const c of document.querySelectorAll('[data-rule]'))c.checked=!!cfg.optional_rules[c.dataset.rule];
+ $('radarVariant').checked=cfg.radar_1942_variant;$('realisticCommand').checked=cfg.realistic_command;$('battleReport').checked=cfg.battle_report;
+ $('squalls').value=cfg.squall_hexes.join(',');dirty=false;$('dirty').hidden=true;loadBriefing(cfg.scenario_id);
+}
+function collect(){
+ const rules={};for(const c of document.querySelectorAll('[data-rule]'))rules[c.dataset.rule]=c.checked;
+ const seed=Number($('seed').value);if(!Number.isInteger(seed))throw Error('随机种子必须是整数');
+ return {scenario_id:$('scenario').value,seed,optional_rules:rules,
+  radar_1942_variant:$('radarVariant').checked,realistic_command:$('realisticCommand').checked,
+  battle_report:$('battleReport').checked,squall_hexes:$('squalls').value.split(/[,，;；\s]+/).filter(Boolean).map(s=>s.toUpperCase())};
+}
+async function api(url,method='GET',body){
+ const opt={method,cache:'no-store'};
+ if(body!==undefined){opt.headers={'Content-Type':'application/json'};opt.body=JSON.stringify(body)}
+ const r=await fetch(url,opt),txt=await r.text();let data;try{data=JSON.parse(txt)}catch{throw Error(txt.slice(0,300))}
+ if(!r.ok)throw Error((typeof data.detail==='string'?data.detail:(data.error||'请求失败'))+' (HTTP '+r.status+')');return data;
+}
+async function loadBriefing(id){
+ if(!id)return;$('briefing').textContent='正在读取原版剧本简报……';
+ try{const b=await api('/lan/lobby/briefing/'+encodeURIComponent(id));
+  const lines=[b.title||id,b.date?'日期：'+b.date:'',b.turns?'回合数：'+b.turns:'',b.setup_note||''];
+  if(Array.isArray(b.special_rules)&&b.special_rules.length)lines.push('想定特例：\n'+b.special_rules.map(x=>'• '+(x.text||x.id)).join('\n'));
+  $('briefing').textContent=lines.filter(Boolean).join('\n\n')||'此剧本暂无可用简报';
+ }catch(e){$('briefing').textContent=String(e)}
+}
+function paint(s){
+ const prev=state;state=s;
+ if(!firstGameSet){originalGame=s.game_id;firstGameSet=true}
+ $('identity').textContent=(s.side==='axis'?'轴心国':'同盟国')+' 玩家（已认证）';
+ $('axisReady').textContent='轴心国：'+(s.ready.axis?'已准备':'未准备');
+ $('alliesReady').textContent='同盟国：'+(s.ready.allies?'已准备':'未准备');
+ $('revision').textContent='配置版本：'+s.revision;
+ $('progress').textContent=s.error||((s.ready.axis||s.ready.allies)?'正在等待另一方确认。双方准备后将自动开局。':'双方可修改设置并确认准备。');
+ $('activeGame').hidden=!s.game_url;
+ if(s.game_url)$('resume').href=s.game_url;
+ $('ready').textContent=s.ready[s.side]?'取消准备':'我已确认，准备完毕';
+ $('ready').disabled=dirty;
+ if(!dirty && (!prev || prev.revision!==s.revision))fill(s.config);
+ if(dirty && prev && prev.revision!==s.revision){warning('对方已经修改配置；请点击“读取最新”，核对之后再保存。')}else if(!dirty){warning(s.error||'')}
+ if(s.game_id && originalGame!==s.game_id){location.replace(s.game_url)}
+}
+async function refresh(){if(polling)return;polling=true;try{paint(await api('/lan/lobby/state'))}catch(e){warning(String(e))}finally{polling=false}}
+async function save(){if(!state)return;try{
+ $('save').disabled=true;const next=await api('/lan/lobby/config','POST',{revision:state.revision,config:collect()});dirty=false;warning('');paint(next);
+ }catch(e){warning(String(e))}finally{$('save').disabled=false}}
+$('save').onclick=save;
+$('reload').onclick=()=>{dirty=false;refresh().then(()=>{if(state){fill(state.config);warning('')}})};
+$('ready').onclick=async()=>{if(!state)return;try{
+ $('ready').disabled=true;const next=await api('/lan/lobby/ready','POST',{revision:state.revision,ready:!state.ready[state.side]});paint(next);
+ }catch(e){warning(String(e));await refresh()}finally{$('ready').disabled=dirty}}
+async function boot(){try{
+ scenarios=await api('/lan/lobby/scenarios');const sel=$('scenario');sel.replaceChildren();
+ for(const row of scenarios){const opt=document.createElement('option');opt.value=row.id;opt.textContent=row.title+' · '+row.id+(row.custom?'（工坊）':'');sel.append(opt)}
+ if(!scenarios.length)throw Error('原版服务器未提供可选剧本');await refresh();setInterval(refresh,2200);
+ }catch(e){warning('大厅初始化失败：'+String(e))}}
+boot();
+</script>
+</body></html>

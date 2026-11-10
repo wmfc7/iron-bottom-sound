@@ -1,0 +1,38 @@
+《铁底湾的回响 IV》局域网双人对战：双方已封存却不推进修复
+版本：2026-11-10 恢复版 v2
+
+适用：已经安装之前的实验性 LAN 对战网关 lan_server.py，前端已编译成功。
+本修复只需要替换游戏根目录的 lan_server.py；不需要修改或重编前端。
+
+一、未更换文件之前的即时排查
+1. 使用已加入房间的浏览器打开 http://主机IP:8765/lan/control
+2. 检查 own_submitted / both_submitted / last_error。
+3. 如果 both_submitted 为 true，尝试点击「重试阶段推进」。
+4. 如果 last_error 有内容，查看主机命令窗口里的 [LAN DUEL] 日志。
+5. 如果 both_submitted=false，检查另一方的 own_submitted 是否为 true；如果 false，说明这一方没有成功提交订单，不能强行推进。
+
+二、安装修复
+1. 在主机服务窗口按 Ctrl+C 停止 lan_server.py（不要运行“新建联机房间.bat”）。
+2. 备份原文件：
+   cd "C:\Users\19195\Desktop\iron-bottom-sound"
+   Copy-Item .\lan_server.py .\lan_server.py.before-recovery.bak
+3. 将本包里的 lan_server.py 覆盖到上述游戏目录。
+4. 可选检查：python -m py_compile .\lan_server.py
+5. 启动原先的“启动局域网双人对战.bat”（注意：不要运行“新建联机房间.bat”）。
+6. 原房间通过 backend/lan-duel-room.json 恢复，保留游戏 ID 和双方邀请令牌；如果阶段双方已封存，服务器会检查并尝试恢复推进。
+7. 两边浏览器按 F5 刷新并检查同一房间的阶段。
+
+三、本次修改内容
+- 服务启动后自动检查原房间是否存在双方已封存的阶段，并尝试继续推进。
+- 服务器每 3 秒检查是否存在已封存但仍卡住的阶段，自动补做单次推进。
+- 规则引擎拒绝（例如 HTTP 409）时不重复刷屏：保持订单，显示错误提示，等待人工检查或手动重试。
+- 主机终端输出阶段推进前后状态和完整错误；/lan/control 只给出安全的简要错误，避免泄露对手秘密订单信息。
+- 手动重试可返回当前回合/阶段、双方封存标志和错误状态。
+- 不修改原版 Python 规则引擎、前端 App.tsx 或现有 SQLite 存档。
+
+四、安全须知
+- 不要删除 backend/lan-duel-room.json；不要重新建立房间，否则会更换当前房间与邀请码。
+- 只在可信的私人局域网运行。不要映射公网端口。
+- 若主机日志出现规则特例拒绝（如 rule_blockers），不能绕过原版引擎强行推进；请保留日志另行定位。
+
+验证：模拟 API 合约测试 6 项全部通过（包含恢复双方已封存及 409 后手动重试）；未在你的实际 Windows 游戏环境中做端到端验收。
