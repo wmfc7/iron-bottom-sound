@@ -48,3 +48,7 @@ resources/derived/rag/*.sqlite3-wal
 /ibs-dice-diagnostic-*/
 /iron-bottom-sound-cleanup-report/
 *.bak
+# Per-device EasyTier secrets (never put them in Git)
+/easytier*.toml
+/.easytier/
+/secrets/

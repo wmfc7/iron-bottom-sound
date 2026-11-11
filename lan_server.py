@@ -201,6 +201,17 @@ async def recovery_watchdog() -> None:
 
 
 def lan_address() -> str:
+    # IBS_EASYTIER_ADVERTISE_V1: only controls the advertised join URLs.
+    advertised = os.environ.get('IBS_LAN_ADVERTISE_IP', '').strip()
+    if advertised:
+        from ipaddress import IPv4Address
+        try:
+            address = IPv4Address(advertised)
+        except ValueError as exc:
+            raise RuntimeError('Invalid IBS_LAN_ADVERTISE_IP') from exc
+        if address.is_loopback or address.is_unspecified or address.is_multicast:
+            raise RuntimeError('IBS_LAN_ADVERTISE_IP must be a reachable IPv4 address')
+        return str(address)
     # UDP connect selects outbound LAN interface without sending a datagram.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
