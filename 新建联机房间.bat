@@ -1,5 +1,4 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
-python lan_server.py --host 0.0.0.0 --port 8765 --new-room --scenario IBS-S-03
-pause
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lan\start-lan.ps1" -Mode inherit -NewRoom -Scenario IBS-S-03
+if errorlevel 1 pause

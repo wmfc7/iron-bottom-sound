@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-sys.path.insert(0, str(Path(__file__).parent))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
 from lan_dice import DiceBridge, RandomSource
 from install_online_dice import install
 
@@ -98,7 +99,7 @@ def test_hrng_strict_and_unbiased_rejection(tmp_path):
     t.join(2)
 
 def test_patch_anchors_against_previous_v3_snapshot():
-    src=Path(__file__).parent.joinpath('lan_server.py').read_text(encoding='utf-8')
+    src=ROOT / 'lan_server.py'.read_text(encoding='utf-8')
     mod=install(src)
     assert mod.count('_dice_bridge.advance(call_engine')==2
     assert mod.count('/lan/dice/client.js')==1

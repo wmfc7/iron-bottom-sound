@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-sys.path.insert(0, str(Path(__file__).parent))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
 from lan_dice import DiceBridge, _effective, _rule, RandomSource
 from 升级交互骰子v2 import upgrade
 
@@ -134,7 +135,7 @@ def test_dice_math_and_fail_closed():
 
 
 def test_installer_matches_saved_online_snapshot():
-    path = Path(__file__).with_name('lan_server.py')
+    path = ROOT / 'lan_server.py'
     if not path.is_file():
         pytest.skip('test requires game root lan_server.py')
     text = path.read_text(encoding='utf-8')

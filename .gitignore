@@ -39,3 +39,12 @@ resources/derived/rag/*.sqlite3-wal
 /backend/lan-duel-room.json
 /frontend/src/App.tsx.before-lan-duel.bak
 /backend/lan-unseal-checkpoint.json
+
+# IBS LAN: private runtime data and rebuildable local outputs
+/backend/lan-dice-audit.jsonl
+/ibs_cpu_rng.obj
+/ibs_cpu_rng.exp
+/ibs_cpu_rng.lib
+/ibs-dice-diagnostic-*/
+/iron-bottom-sound-cleanup-report/
+*.bak

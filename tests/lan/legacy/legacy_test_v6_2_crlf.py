@@ -4,8 +4,8 @@ import ast
 import sys
 from pathlib import Path
 
-THIS = Path(__file__).resolve().parent
-sys.path.insert(0, str(THIS / 'IBS_Dice_Gunnery_Privacy_v6'))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / 'IBS_Dice_Gunnery_Privacy_v6'))
 from patch_gateway_v6 import patch_gateway
 
 
