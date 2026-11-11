@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   advance,
   aiOpponent,
@@ -311,6 +311,7 @@ export default function App() {
   const [selected, setSelected] = useState<Ship>();
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
+  const retractedDraftRef = useRef<string | null>(null);
   const [planIntent, setPlanIntent] = useState("");
   const [actionHints, setActionHints] = useState<Record<string, unknown>>({});
   const [serverReport, setServerReport] = useState<BattleReport>();
@@ -364,6 +365,58 @@ export default function App() {
     viewer: Side;
     turn: number;
   } | null>(null);
+  // IBS_LAN_GUNNERY_OUTCOME_V6
+  // Reuse the original side-filtered artillery report instead of exposing raw
+  // unfiltered world-state events. The server holds its next phase until both
+  // players confirm this exact existing report modal.
+  useEffect(() => {
+    if (!LAN_MODE || !game || reportMode) return;
+    let alive = true;
+    let inFlight = false;
+    let loadedKey: string | null = null;
+    const check = async () => {
+      if (!alive || inFlight) return;
+      inFlight = true;
+      try {
+        const response = await fetch('/lan/gunnery/checkpoint', {
+          credentials: 'same-origin', cache: 'no-store'
+        });
+        if (!response.ok) return;
+        const state = await response.json() as {
+          pending: boolean; turn?: number; acknowledged?: boolean
+        };
+        if (!state.pending || state.acknowledged || state.turn == null) return;
+        const key = `${game}:${state.turn}`;
+        if (loadedKey === key) return;
+        // The existing /events endpoint is side-filtered by the LAN gateway.
+        const events = await gameEvents(game, side, 0);
+        if (!alive) return;
+        loadedKey = key;
+        setGunneryOutcome({
+          events: events.filter(e => e.turn === state.turn &&
+            (e.type === 'gun_mount_attack' || e.type === 'gunnery_result')),
+          viewer: side, turn: state.turn
+        });
+      } catch (_) {
+        // Retried on next poll. Never bypass the two-player report checkpoint.
+      } finally { inFlight = false; }
+    };
+    void check();
+    const timer = window.setInterval(() => { void check(); }, 1600);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [game, side, reportMode]);
+  const closeGunneryOutcome = async () => {
+    if (!LAN_MODE) { setGunneryOutcome(null); return; }
+    try {
+      const r = await fetch('/lan/gunnery/ack', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store'
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setGunneryOutcome(null);
+    } catch (err) {
+      setError('无法确认炮击战果，请保持当前弹窗并重试：' + String(err));
+    }
+  };
   const llmConfig: LLMConnectionConfig = {
     provider: llmProvider,
     model: llmModel.trim(),
@@ -501,15 +554,20 @@ export default function App() {
       };
     }
     if (view && game && orderPhases.has(view.phase) && !view.own_orders_submitted) {
-        setDraft("");
-      suggestedOrders(game, side, guideProfiles[side])
-        .then((batch) => {
-          if (active) setDraft(JSON.stringify(batch, null, 2));
-        })
-        .catch(() => {
-          if (active)
-            setDraft(JSON.stringify(defaultBatch(view, side), null, 2));
-        });
+        if (LAN_MODE && retractedDraftRef.current !== null) {
+          setDraft(retractedDraftRef.current);
+          retractedDraftRef.current = null;
+        } else {
+          setDraft("");
+          suggestedOrders(game, side, guideProfiles[side])
+            .then((batch) => {
+              if (active) setDraft(JSON.stringify(batch, null, 2));
+            })
+            .catch(() => {
+              if (active)
+                setDraft(JSON.stringify(defaultBatch(view, side), null, 2));
+            });
+        }
       legalActions(game, side)
         .then((actions) => {
           if (active) setActionHints(actions[0]?.schema_hint ?? {});
@@ -914,6 +972,28 @@ export default function App() {
       setError(String(e));
     }
   };
+  const retractSealedOrders = async () => {
+    if (!LAN_MODE || !game || !view || acting || llmBusy ||
+        !orderPhases.has(view.phase) || !view.own_orders_submitted ||
+        view.both_orders_submitted) return;
+    setActing(true);
+    try {
+      const response = await fetch('/lan/retract-orders', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store'
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      retractedDraftRef.current = JSON.stringify(data.draft, null, 2);
+      await refresh(game, side);
+      setError('');
+    } catch (error) {
+      setError('撤回封存失败：' + String(error));
+      // Ensure a stale UI cannot keep offering an invalid withdrawal.
+      try { await refresh(game, side); } catch (_) { /* Retry later */ }
+    } finally {
+      setActing(false);
+    }
+  };
   const act = async () => {
     if (!game || !view || acting) return;
     setActing(true);
@@ -1045,7 +1125,7 @@ export default function App() {
             events={gunneryOutcome.events}
             viewer={gunneryOutcome.viewer}
             turn={gunneryOutcome.turn}
-            onClose={() => setGunneryOutcome(null)}
+            onClose={() => { void closeGunneryOutcome(); }}
           />
         )}
       </main>
@@ -1182,6 +1262,15 @@ export default function App() {
                     ? commandDelay ? "提交并继续编队执行" : "提交并让 LLM 接招"
                     : "校验、封存并交接"
               : "执行引擎裁决"}
+          </button>
+        )}
+        {/* IBS_LAN_UNSEAL_V1 */}
+        {LAN_MODE && orderPhases.has(view.phase) && view.own_orders_submitted &&
+         !view.both_orders_submitted && (
+          <button type="button" disabled={acting || llmBusy}
+            onClick={() => { void retractSealedOrders(); }}
+            title="仅在对方尚未封存本阶段计划时可撤回">
+            取消封存
           </button>
         )}
       </header>
@@ -1420,7 +1509,7 @@ export default function App() {
           events={gunneryOutcome.events}
           viewer={gunneryOutcome.viewer}
           turn={gunneryOutcome.turn}
-          onClose={() => setGunneryOutcome(null)}
+          onClose={() => { void closeGunneryOutcome(); }}
         />
       )}
       {error && (

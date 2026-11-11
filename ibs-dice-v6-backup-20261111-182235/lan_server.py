@@ -1,0 +1,629 @@
+"""Iron Bottom Sound IV LAN duel gateway.
+
+Place in repository root, after running patch_frontend.py and building frontend.
+Run with one uvicorn worker, because the authoritative game engine is in-process.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+import re
+import secrets
+import socket
+from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import quote
+
+import httpx
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
+from fastapi.staticfiles import StaticFiles
+
+try:
+    from iron_bottom_sound import api as upstream_api
+except ImportError as exc:
+    raise SystemExit('请先在项目根目录安装：python -m pip install -e .') from exc
+
+ROOT = Path(__file__).resolve().parent
+FRONTEND = ROOT / 'frontend' / 'dist'
+ROOMFILE = ROOT / 'backend' / 'lan-duel-room.json'
+LOBBY_HTML = ROOT / 'lan_lobby.html'
+OPTIONAL_RULES = ('hidden_contacts', 'radar', 'star_shells', 'searchlights', 'malfunction_66', 'squalls', 'smoke', 'silhouettes', 'hidden_damage', 'blind_torpedoes')
+COOKIE = 'ibs_lan_ticket'
+ORDER_PHASES = {
+    'formation_setup', 'contact_setup', 'reinforcement',
+    'movement_planning', 'torpedo_planning', 'gunnery',
+}
+READ_ACTIONS = {
+    'view', 'legal-actions', 'events', 'suggested-orders',
+    'movement-style-options', 'sealed-trajectories', 'export', 'briefing',
+    'torpedo-tactics',
+}
+POST_PREVIEWS = {
+    'night-preview', 'formation-preview', 'formation-movement-preview',
+    'movement-preview', 'movement-trajectories', 'field-of-fire',
+    'torpedo-assist', 'gunnery-assist',
+}
+# No saves, battle reports, replay, AI debug, direct AI commands, arbitrary game creation,
+# custom scenario modification or world-state exports from the multiplayer gateway.
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(recovery_watchdog())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title='Iron Bottom Sound LAN Duel', docs_url=None, redoc_url=None, openapi_url=None,
+              lifespan=lifespan)
+_guard = asyncio.Lock()
+_room: dict = {}
+_last_error = ''
+
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+def get_player(request: Request) -> str:
+    ticket = request.cookies.get(COOKIE, '')
+    # Both sides have 256-bit independent capability tokens.
+    if not ticket or not _room:
+        raise HTTPException(401, '尚未加入对局：请使用自己的阵营邀请链接')
+    candidate = token_digest(ticket)
+    for side in ('axis', 'allies'):
+        if secrets.compare_digest(candidate, _room['hashes'][side]):
+            return side
+    raise HTTPException(401, '邀请令牌无效或房间已更换')
+
+
+def origin_ok(request: Request) -> bool:
+    origin = request.headers.get('origin')
+    # Browser same-origin fetch should normally provide Origin for JSON POST.
+    # If absent, permit same-origin browser requests; capability cookie remains required.
+    return origin is None or origin == f'{request.url.scheme}://{request.headers.get("host", "")}'
+
+
+# IBS_LAN_INTERACTIVE_DICE_V1
+from lan_dice import DiceBridge
+_dice_bridge = DiceBridge(ROOT / 'backend' / 'lan-dice-audit.jsonl')
+_dice_bridge.install(upstream_api.engine.__class__)
+_dice_bridge.register(app, get_player, origin_ok)
+
+async def call_engine(method: str, path: str, side: str | None = None, data: bytes | None = None, query: str = '') -> httpx.Response:
+    headers = {'X-Player-Side': side} if side else {}
+    if data is not None:
+        headers['Content-Type'] = 'application/json'
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream_api.app), base_url='http://internal', timeout=(None if method == 'POST' and path.endswith('/advance') else 90)) as client:
+        return await client.request(method, path + (('?' + query) if query else ''), headers=headers, content=data)
+
+
+async def observation(side: str = 'axis') -> dict:
+    response = await call_engine('GET', f'/games/{_room["game_id"]}/view', side)
+    if response.status_code != 200:
+        raise RuntimeError(f'读取游戏状态失败：{response.status_code} {response.text[:300]}')
+    return response.json()
+
+
+async def advance_until_order_phase() -> None:
+    """Only this gateway drives the original rules engine. Caller holds _guard."""
+    global _last_error
+    for _ in range(24):
+        state = await observation()
+        phase = state.get('phase', '')
+        if phase in ORDER_PHASES or phase == 'complete':
+            _last_error = ''
+            return
+        result = await _dice_bridge.advance(call_engine, f'/games/{_room["game_id"]}/advance')
+        if result.status_code >= 400:
+            raise RuntimeError(f'自动推进 {phase} 失败：{result.status_code} {result.text[:500]}')
+    raise RuntimeError('自动推进超过24阶段，已停止以避免错误循环')
+
+
+async def settle_after_submit() -> None:
+    """Advance a sealed phase once. Caller must hold _guard."""
+    global _last_error
+    try:
+        response = await observation()
+        if response.get('phase') not in ORDER_PHASES or not response.get('both_orders_submitted', False):
+            return
+        before = f"回合{response.get('turn')} / {response.get('phase')}"
+        print(f'[LAN DUEL] 双方封存 {before}，正在推进', flush=True)
+        result = await _dice_bridge.advance(call_engine, f'/games/{_room["game_id"]}/advance')
+        if result.status_code >= 400:
+            # Do not show potentially secret engine details to opposing players.
+            print(f'[LAN DUEL] 原版引擎拒绝：HTTP {result.status_code} {result.text[:1000]}', flush=True)
+            raise RuntimeError(f'规则引擎拒绝推进（HTTP {result.status_code}）；请查看主机终端的详细日志')
+        await advance_until_order_phase()
+        after = await observation()
+        print(f"[LAN DUEL] 推进成功：{before} → 回合{after.get('turn')} / {after.get('phase')}", flush=True)
+        _last_error = ''
+    except Exception as exc:
+        detail = str(exc)
+        # Never expose internal engine errors that might contain other-side data.
+        _last_error = detail if detail.startswith('规则引擎拒绝推进（HTTP ') else '阶段推进异常；详细原因请查看主机终端日志'
+        # Orders remain persisted in the original engine. No automatic resubmission.
+        print('[LAN DUEL] 阶段推进失败（保留已封存订单）：' + detail, flush=True)
+
+
+async def reconcile_once() -> None:
+    """Resume an already sealed phase after restart/dropped final response."""
+    global _last_error
+    if not _room or not _room.get('game_id'):
+        return
+    async with _guard:
+        try:
+            state = await observation()
+            phase = state.get('phase')
+            if phase in ORDER_PHASES:
+                if state.get('both_orders_submitted'):
+                    await settle_after_submit()
+            elif phase != 'complete':
+                await advance_until_order_phase()
+        except Exception as exc:
+            # Keep all orders; permanent rule errors require operator review.
+            print(f'[LAN DUEL] 自动恢复异常：{exc}', flush=True)
+            _last_error = '自动恢复失败，请查看主机终端日志'
+
+
+async def recovery_watchdog() -> None:
+    """Poll server state; stop retrying after rule errors until manual retry."""
+    while True:
+        await asyncio.sleep(3)
+        if _room.get('game_id') and not _last_error:
+            await reconcile_once()
+
+
+def lan_address() -> str:
+    # UDP connect selects outbound LAN interface without sending a datagram.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(('192.0.2.1', 9))
+            return sock.getsockname()[0]
+    except OSError:
+        return '主机IPv4地址'
+
+
+async def prepare_room(scenario: str, seed: int, new_room: bool, port: int) -> None:
+    global _room
+    # A directly reachable original backend bypasses all side isolation.
+    for old_port in (8000, 5173):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            if probe.connect_ex(('127.0.0.1', old_port)) == 0:
+                raise RuntimeError(f'检测到原版端口 {old_port} 正在监听。先运行 scripts/stop-game.ps1 停止旧服务，避免绕过联机网关。')
+    if not FRONTEND.is_dir() or not (FRONTEND / 'index.html').exists():
+        raise RuntimeError('未找到 frontend/dist/index.html；先运行 python patch_frontend.py 和 pnpm.cmd run build')
+    ROOMFILE.parent.mkdir(exist_ok=True, parents=True)
+    if ROOMFILE.exists() and not new_room:
+        _room = json.loads(ROOMFILE.read_text(encoding='utf-8'))
+        if not all(k in _room for k in ('game_id', 'hashes', 'tickets')):
+            raise RuntimeError('房间文件结构无效；请备份后使用 --new-room 创建新房间')
+        if _room.get('game_id'):
+            check = await call_engine('GET', f'/games/{_room["game_id"]}/view', 'axis')
+            if check.status_code != 200:
+                raise RuntimeError('旧房间在游戏数据库中不存在；请备份后通过 --new-room 重新建房')
+        print('正在恢复旧房间（原存档不被删除）。', flush=True)
+    else:
+        tickets = {'axis': secrets.token_urlsafe(32), 'allies': secrets.token_urlsafe(32)}
+        _room = {'game_id': None, 'scenario': scenario, 'tickets': tickets,
+                 'hashes': {side: token_digest(ticket) for side, ticket in tickets.items()},
+                 'previous_game_ids': []}
+        print('已创建联机准备大厅；双方确认后才创建对局。', flush=True)
+    if 'lobby' not in _room:
+        _room['lobby'] = fresh_lobby(_room.get('scenario') or scenario, seed)
+    save_room()
+    # Previous sealed orders can still be resumed without changing the saved game.
+    if _room.get('game_id'):
+        await reconcile_once()
+    ip = lan_address()
+    print('\n=========== 局域网双人对战 ===========', flush=True)
+    print(f'当前对局：{_room.get("game_id") or "尚未创建，等待双方在大厅准备"}', flush=True)
+    print(f'轴心国（只发给玩家 A）：http://{ip}:{port}/join#{_room["tickets"]["axis"]}', flush=True)
+    print(f'同盟国（只发给玩家 B）：http://{ip}:{port}/join#{_room["tickets"]["allies"]}', flush=True)
+    print('双方通过邀请链接进入 /lan/lobby，确认规则后开始新局。', flush=True)
+    print('请勿向对手分享自己阵营的邀请链接。不要开放到公网。', flush=True)
+    print('===================================\n', flush=True)
+
+
+def fresh_lobby(scenario_id: str, seed: int = 1) -> dict:
+    return {'revision': 1, 'config': {'scenario_id': scenario_id, 'seed': seed,
+            'optional_rules': {name: False for name in OPTIONAL_RULES},
+            'squall_hexes': [], 'radar_1942_variant': False,
+            'realistic_command': False, 'battle_report': False},
+            'ready': {'axis': False, 'allies': False}, 'error': ''}
+
+
+def save_room() -> None:
+    ROOMFILE.parent.mkdir(exist_ok=True, parents=True)
+    tmp = ROOMFILE.with_suffix('.tmp')
+    tmp.write_text(json.dumps(_room, ensure_ascii=False, indent=2), encoding='utf-8')
+    os.replace(tmp, ROOMFILE)
+    try:
+        os.chmod(ROOMFILE, 0o600)
+    except OSError:
+        pass
+
+
+def current_game_url(side: str) -> str | None:
+    game_id = _room.get('game_id')
+    return f'/?game={quote(game_id)}&side={side}&lan=1' if game_id else None
+
+
+def public_lobby(side: str) -> dict:
+    lobby = _room['lobby']
+    return {'side': side, 'revision': lobby['revision'],
+            'config': lobby['config'], 'ready': lobby['ready'],
+            'error': lobby.get('error', ''), 'game_id': _room.get('game_id'),
+            'game_url': current_game_url(side)}
+
+
+async def available_scenarios() -> list[dict]:
+    builtin = await call_engine('GET', '/scenarios')
+    if builtin.status_code != 200 or not isinstance(builtin.json(), list):
+        raise HTTPException(502, '原版剧本列表读取失败')
+    rows = builtin.json()
+    custom = await call_engine('GET', '/custom-scenarios')
+    if custom.status_code == 200 and isinstance(custom.json(), list):
+        rows = rows + custom.json()
+    result = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        scenario_id = row.get('id')
+        if isinstance(scenario_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,90}', scenario_id):
+            result[scenario_id] = {
+                'id': scenario_id, 'title': str(row.get('title', scenario_id))[:160],
+                'turns': row.get('turns'), 'custom': scenario_id.startswith('IBS-CUSTOM-')
+            }
+    return list(result.values())
+
+
+def normalize_configuration(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(422, '配置必须是 JSON 对象')
+    fields = {'scenario_id', 'seed', 'optional_rules', 'squall_hexes',
+              'radar_1942_variant', 'realistic_command', 'battle_report'}
+    if set(payload) != fields:
+        raise HTTPException(422, '配置字段不完整或包含不支持的选项')
+    sid = payload['scenario_id']
+    if not isinstance(sid, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,90}', sid):
+        raise HTTPException(422, '剧本 ID 无效')
+    seed = payload['seed']
+    if type(seed) is not int or not (0 <= seed <= 2147483647):
+        raise HTTPException(422, '随机种子必须是 0 至 2147483647 的整数')
+    rules = payload['optional_rules']
+    if not isinstance(rules, dict) or set(rules) != set(OPTIONAL_RULES) or any(type(v) is not bool for v in rules.values()):
+        raise HTTPException(422, '可选规则字段不合法')
+    squalls = payload['squall_hexes']
+    if not isinstance(squalls, list) or len(squalls) > 32 or any(
+        not isinstance(v, str) or not re.fullmatch(r'[A-Za-z]{1,3}[0-9]{1,3}', v) for v in squalls
+    ):
+        raise HTTPException(422, '暴风雨坐标无效，示例 A12，最多32个')
+    if squalls and not rules['squalls']:
+        raise HTTPException(422, '指定风暴格前必须启用风暴规则')
+    for key in ('radar_1942_variant', 'realistic_command', 'battle_report'):
+        if type(payload[key]) is not bool:
+            raise HTTPException(422, f'{key} 必须是布尔值')
+    return dict(payload)
+
+
+@app.get('/lan/lobby', response_class=HTMLResponse)
+async def lobby_page(request: Request):
+    get_player(request)
+    return HTMLResponse(LOBBY_HTML.read_text(encoding='utf-8'), headers={
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    })
+
+
+@app.get('/lan/lobby/state')
+async def lobby_state(request: Request):
+    side = get_player(request)
+    async with _guard:
+        return JSONResponse(public_lobby(side), headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/lan/lobby/scenarios')
+async def lobby_scenarios(request: Request):
+    get_player(request)
+    return JSONResponse(await available_scenarios(), headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/lan/lobby/briefing/{scenario_id}')
+async def lobby_briefing(scenario_id: str, request: Request):
+    get_player(request)
+    if scenario_id not in {row['id'] for row in await available_scenarios()}:
+        raise HTTPException(404, '没有找到此剧本')
+    result = await call_engine('GET', f'/scenarios/{scenario_id}/briefing')
+    return response_from_upstream(result)
+
+
+@app.post('/lan/lobby/config')
+async def lobby_config(request: Request):
+    side = get_player(request)
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站请求被拒绝')
+    data = await request.json()
+    if not isinstance(data, dict) or type(data.get('revision')) is not int:
+        raise HTTPException(422, '缺少配置版本号')
+    config = normalize_configuration(data.get('config'))
+    async with _guard:
+        lobby = _room['lobby']
+        if data['revision'] != lobby['revision']:
+            raise HTTPException(409, '另一名玩家已修改配置，请刷新后重试')
+        scenarios = await available_scenarios()
+        if config['scenario_id'] not in {entry['id'] for entry in scenarios}:
+            raise HTTPException(422, '这个剧本不在原版可选列表中')
+        if config != lobby['config']:
+            lobby['config'] = config
+            lobby['ready'] = {'axis': False, 'allies': False}
+            lobby['revision'] += 1
+            lobby['error'] = ''
+            save_room()
+        return JSONResponse(public_lobby(side))
+
+
+@app.post('/lan/lobby/ready')
+async def lobby_ready(request: Request):
+    side = get_player(request)
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站请求被拒绝')
+    data = await request.json()
+    if not isinstance(data, dict) or type(data.get('revision')) is not int or type(data.get('ready')) is not bool:
+        raise HTTPException(422, '需要版本号和准备状态')
+    async with _guard:
+        lobby = _room['lobby']
+        if data['revision'] != lobby['revision']:
+            raise HTTPException(409, '本局配置已更新，请先查看双方最新选择')
+        lobby['ready'][side] = data['ready']
+        lobby['error'] = ''
+        if all(lobby['ready'].values()):
+            # Revalidate scenario before creating any game; never expose arbitrary POST /games.
+            config = normalize_configuration(lobby['config'])
+            if config['scenario_id'] not in {entry['id'] for entry in await available_scenarios()}:
+                lobby['ready'] = {'axis': False, 'allies': False}
+                save_room()
+                raise HTTPException(422, '剧本已不可用，请重新选择')
+            body = {'scenario_id': config['scenario_id'], 'seed': config['seed'],
+                'options': {'mode': 'hotseat', 'ruleset_version': 'night-v2',
+                    'battle_report': config['battle_report'],
+                    'realistic_command': config['realistic_command'],
+                    'optional_rules': config['optional_rules'],
+                    'squall_hexes': config['squall_hexes'],
+                    'radar_1942_variant': config['radar_1942_variant'],
+                    'command_delay_mode': False},
+                'research_consent': {'allow': False}}
+            created = await call_engine('POST', '/games', data=json.dumps(body).encode('utf-8'))
+            if created.status_code not in (200, 201):
+                print(f'[LAN LOBBY] 创建对局失败 HTTP {created.status_code}: {created.text[:1500]}', flush=True)
+                lobby['ready'] = {'axis': False, 'allies': False}
+                lobby['error'] = f'原版引擎拒绝当前剧本与规则组合（HTTP {created.status_code}）；请修改配置，详细原因见主机终端'
+                save_room()
+                return JSONResponse(public_lobby(side), status_code=422)
+            game_id = created.json().get('game_id')
+            if not isinstance(game_id, str) or not game_id:
+                raise HTTPException(502, '原版创建对局接口缺少游戏 ID')
+            if _room.get('game_id'):
+                _room.setdefault('previous_game_ids', []).append(_room['game_id'])
+            _room['game_id'] = game_id
+            _room['scenario'] = config['scenario_id']
+            lobby['revision'] += 1
+            lobby['ready'] = {'axis': False, 'allies': False}
+            lobby['error'] = ''
+            save_room()
+            print(f'[LAN LOBBY] 双方同意：创建 {config["scenario_id"]} 对局 {game_id}', flush=True)
+        else:
+            save_room()
+        return JSONResponse(public_lobby(side))
+
+
+@app.get('/')
+async def lan_root(request: Request):
+    side = get_player(request)
+    if request.query_params.get('game') != _room.get('game_id') or request.query_params.get('side') != side or request.query_params.get('lan') != '1':
+        return RedirectResponse('/lan/lobby', status_code=303)
+    # Add a visible route back to the shared lobby even when the React app
+    # handles its own Home button without changing the URL.
+    html = (FRONTEND / 'index.html').read_text(encoding='utf-8')
+    shortcut = '<a href="/lan/lobby" style="position:fixed;right:18px;bottom:16px;z-index:2147483000;background:#123d59;color:white;padding:10px 15px;border:1px solid #73b8dc;border-radius:9px;font:600 14px sans-serif;text-decoration:none">返回联机准备大厅</a>'
+    html = html.replace('</body>', shortcut + '<script src="/lan/dice/client.js" defer></script></body>')
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/join', response_class=HTMLResponse)
+async def join_page():
+    # Fragment is not sent to server, so the invite ticket never appears in GET logs/referrers.
+    return HTMLResponse('''<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>加入铁底湾联机</title>
+    <body style="font:18px sans-serif;margin:10vh auto;max-width:540px"><h2>加入铁底湾双人对战</h2><p id="result">正在校验你的阵营邀请链接……</p>
+    <script>
+    (async function(){const token=decodeURIComponent(location.hash.slice(1));history.replaceState(null,'','/join');
+     if(!token){document.querySelector('#result').textContent='邀请链接缺少令牌';return;}
+     try{const r=await fetch('/lan/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket:token})});
+         const j=await r.json();if(!r.ok)throw Error(j.detail||'加入失败');location.replace(j.redirect);}
+     catch(e){document.querySelector('#result').textContent=String(e);}})();
+    </script></body></html>''', headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/lan/claim')
+async def claim(request: Request):
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站请求被拒绝')
+    data = await request.json()
+    ticket = data.get('ticket', '') if isinstance(data, dict) else ''
+    if not isinstance(ticket, str) or not ticket:
+        raise HTTPException(401, '缺少加入令牌')
+    side = None
+    for candidate_side in ('axis', 'allies'):
+        if secrets.compare_digest(token_digest(ticket), _room['hashes'][candidate_side]):
+            side = candidate_side
+            break
+    if side is None:
+        raise HTTPException(401, '加入令牌无效')
+    target = '/lan/lobby'
+    response = JSONResponse({'side': side, 'redirect': target})
+    response.set_cookie(COOKIE, ticket, httponly=True, samesite='lax', secure=False,
+                        path='/', max_age=60 * 60 * 24 * 30)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.post('/lan/retry')
+async def retry(request: Request):
+    get_player(request)
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站请求被拒绝')
+    global _last_error
+    if not _room.get('game_id'):
+        raise HTTPException(409, '还没有创建对局，请先在联机大厅双方准备')
+    async with _guard:
+        state = await observation()
+        if state.get('phase') in ORDER_PHASES:
+            if not state.get('both_orders_submitted'):
+                raise HTTPException(409, '另一名玩家还没有封存订单')
+            await settle_after_submit()
+        elif state.get('phase') != 'complete':
+            try:
+                await advance_until_order_phase()
+            except Exception as exc:
+                print('[LAN DUEL] 手动重试失败：' + str(exc), flush=True)
+                _last_error = '手动重试失败；详细原因请查看主机终端日志'
+        current = await observation()
+        return {'last_error': _last_error, 'phase': current.get('phase'),
+                'turn': current.get('turn'),
+                'own_submitted': current.get('own_orders_submitted'),
+                'both_submitted': current.get('both_orders_submitted')}
+
+
+@app.get('/lan/control', response_class=HTMLResponse)
+async def control(request: Request):
+    get_player(request)
+    return HTMLResponse('''<!doctype html><html lang="zh"><meta charset="utf-8"><title>联机状态</title>
+    <body style="font:17px sans-serif;margin:8vh auto;max-width:650px"><h2>铁底湾 · 联机控制台</h2><pre id="state">读取中……</pre>
+    <p id="tip">双方提交后将自动推进。如未推进请保留 last_error。</p>
+    <button id="retry">重试阶段推进</button> <a href="/lan/lobby">前往联机大厅</a>
+    <script>
+    async function update(){let r=await fetch('/lan/status',{cache:'no-store'});let d=await r.json();
+      document.querySelector('#state').textContent=JSON.stringify(d,null,2);
+      document.querySelector('#tip').textContent=d.last_error?'推进失败（保留原订单）：'+d.last_error:
+        d.both_submitted?'双方已封存；等待服务器推进':d.own_submitted?'本方已封存；等待对手':'本方尚未封存';}
+    document.querySelector('#retry').onclick=async()=>{const r=await fetch('/lan/retry',{method:'POST'});alert(JSON.stringify(await r.json()));update()};
+    update();setInterval(update,3000);
+    </script></body></html>''', headers={'Cache-Control':'no-store'})
+
+
+@app.get('/lan/status')
+async def status(request: Request):
+    side = get_player(request)
+    if not _room.get('game_id'):
+        return JSONResponse({'game_id': None, 'side': side, 'phase': 'lobby',
+                             'turn': None, 'own_submitted': False, 'both_submitted': False,
+                             'last_error': ''}, headers={'Cache-Control':'no-store'})
+    async with _guard:
+        view = await observation(side)
+    return JSONResponse({'game_id': _room['game_id'], 'side': side,
+                         'turn': view.get('turn'), 'phase': view.get('phase'),
+                         'own_submitted': view.get('own_orders_submitted'),
+                         'both_submitted': view.get('both_orders_submitted'),
+                         'last_error': _last_error}, headers={'Cache-Control': 'no-store'})
+
+
+def response_from_upstream(res: httpx.Response) -> Response:
+    out = Response(res.content, status_code=res.status_code, media_type=None)
+    if 'content-type' in res.headers:
+        out.headers['content-type'] = res.headers['content-type']
+    out.headers['Cache-Control'] = 'no-store'
+    out.headers['X-Content-Type-Options'] = 'nosniff'
+    return out
+
+
+@app.api_route('/api/{relative:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+async def api_gateway(relative: str, request: Request):
+    side = get_player(request)
+    if request.method not in ('GET', 'POST'):
+        raise HTTPException(403, '该多人对战接口不允许修改游戏配置')
+    if request.method == 'POST' and not origin_ok(request):
+        raise HTTPException(403, '跨站请求被拒绝')
+    if request.query_params.get('debug', '').lower() in ('1', 'true', 'yes'):
+        raise HTTPException(403, '多人对战禁止调试视图')
+    if relative in ('scenarios', 'ship-catalog') and request.method == 'GET':
+        return response_from_upstream(await call_engine('GET', '/' + relative, query=request.url.query))
+    if re.fullmatch(r'scenarios/[A-Za-z0-9_-]+/briefing', relative) and request.method == 'GET':
+        return response_from_upstream(await call_engine('GET', '/' + relative))
+    prefix = f'games/{_room["game_id"]}/'
+    if not relative.startswith(prefix):
+        raise HTTPException(403, '只能访问本房间的已授权接口')
+    action = relative[len(prefix):]
+    if not (request.method == 'GET' and action in READ_ACTIONS or
+            request.method == 'POST' and action in POST_PREVIEWS or
+            request.method == 'POST' and action == 'orders'):
+        raise HTTPException(403, '接口已禁用：隐藏世界状态和管理员功能不能经局域网访问')
+    # Do not trust a client-selected X-Player-Side. The gateway always supplies the bound side.
+    if action == 'orders':
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(400, '订单必须是 JSON')
+        if not isinstance(payload, dict) or payload.get('side') != side:
+            raise HTTPException(403, '只能提交自己阵营的命令')
+        async with _guard:
+            state = await observation(side)
+            if state.get('phase') not in ORDER_PHASES:
+                raise HTTPException(409, '当前不是可下令阶段')
+            if state.get('own_orders_submitted'):
+                raise HTTPException(409, '本阵营已经封存本阶段的命令')
+            res = await call_engine('POST', '/' + relative, side, json.dumps(payload).encode('utf-8'))
+            if res.status_code < 400:
+                # IBS_LAN_INTERACTIVE_DICE_V2_ASYNC_SUBMIT
+                # Do NOT wait for a multi-roll battle in a browser's orders POST.
+                # The coordinator acquires _guard after this request releases it.
+                asyncio.create_task(reconcile_once())
+            reply = response_from_upstream(res)
+            if _last_error:
+                reply.headers['X-LAN-Advance-Error'] = '1'
+            return reply
+    body = await request.body() if request.method == 'POST' else None
+    async with _guard:
+        res = await call_engine(request.method, '/' + relative, side, body, request.url.query)
+    return response_from_upstream(res)
+
+
+@app.get('/assets/counters/{path:path}')
+async def counter_assets(path: str, request: Request):
+    get_player(request)
+    if '..' in path or '\\' in path or not path:
+        raise HTTPException(400, '无效路径')
+    return response_from_upstream(await call_engine('GET', '/assets/counters/' + path))
+
+
+# The game UI is public, but private data is only available through cookie-bound API routes.
+if FRONTEND.is_dir():
+    app.mount('/', StaticFiles(directory=FRONTEND, html=True), name='frontend')
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='铁底湾局域网双人对战网关')
+    parser.add_argument('--scenario', default='IBS-S-03', help='内置想定 ID')
+    parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--host', default='0.0.0.0')
+    parser.add_argument('--new-room', action='store_true', help='建立新房间，覆盖旧邀请码（不删除原版游戏存档）')
+    args = parser.parse_args()
+    async def run():
+        await prepare_room(args.scenario, args.seed, args.new_room, args.port)
+    asyncio.run(run())
+    # This must be a single process: _room and _guard are process-local.
+    uvicorn.run(app, host=args.host, port=args.port, workers=1, log_level='info')
+
+
+if __name__ == '__main__':
+    main()

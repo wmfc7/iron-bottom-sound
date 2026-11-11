@@ -17,16 +17,30 @@ patch = importlib.import_module('patch_frontend')
 
 
 @pytest.fixture
-def simulated(monkeypatch):
-    state = {'phase': 'formation_setup', 'turn': 1, 'submitted': set(), 'advance': 0}
+def simulated(monkeypatch, tmp_path):
+    state = {'phase': 'formation_setup', 'turn': 1, 'submitted': set(), 'advance': 0,
+             'games_created': [], 'game_id': 'game-test'}
+    monkeypatch.setattr(server, 'ROOMFILE', tmp_path / 'room.json')
     ticket = {'axis': 'axis-test-ticket', 'allies': 'allies-test-ticket'}
-    server._room = {'game_id': 'game-test', 'hashes': {k: server.token_digest(v) for k, v in ticket.items()}, 'tickets': ticket}
+    server._room = {'game_id': 'game-test', 'scenario': 'IBS-S-03', 'hashes': {k: server.token_digest(v) for k, v in ticket.items()}, 'tickets': ticket,
+                     'lobby': server.fresh_lobby('IBS-S-03')}
     server._last_error = ''
 
     async def fake_call(method, path, side=None, data=None, query=''):
         def response(status, obj):
             return httpx.Response(status, json=obj)
-        if path == '/games/game-test/view':
+        if path == '/scenarios' and method == 'GET':
+            return response(200, [{'id':'IBS-S-03','title':'通道行动','turns':10}, {'id':'IBS-S-01','title':'埃斯佩兰斯角','turns':12}])
+        if path == '/custom-scenarios' and method == 'GET':
+            return response(200, [])
+        if path == '/scenarios/IBS-S-01/briefing':
+            return response(200, {'title':'埃斯佩兰斯角','special_rules':[]})
+        if path == '/games' and method == 'POST':
+            payload=json.loads(data)
+            state['games_created'].append(payload)
+            state['game_id']='created-' + str(len(state['games_created']))
+            return response(201, {'game_id':state['game_id']})
+        if path == '/games/game-test/view' or path == f"/games/{state['game_id']}/view":
             return response(200, {'phase': state['phase'], 'turn': state['turn'],
                                   'own_orders_submitted': side in state['submitted'],
                                   'both_orders_submitted': len(state['submitted']) == 2})
@@ -163,3 +177,119 @@ def test_advance_failure_is_visible_and_retry_preserves_orders(simulated, monkey
     assert retry.json()['last_error'] == ''
     assert state['advance'] == 1
     assert state['submitted'] == set()
+
+
+def test_lobby_requires_cookie_and_scopes_origin(simulated):
+    client, _, tokens = simulated
+    assert client.get('/lan/lobby/state').status_code == 401
+    join(client, tokens['axis'])
+    assert client.get('/lan/lobby/state').status_code == 200
+    assert client.get('/lan/lobby/scenarios').json()[0]['id'] == 'IBS-S-03'
+    assert client.post('/lan/lobby/ready', json={'revision':1,'ready':True},
+                       headers={'Origin':'http://malicious.invalid'}).status_code == 403
+    assert client.get('/', follow_redirects=False).status_code == 303
+    assert client.get('/', follow_redirects=False).headers['location'] == '/lan/lobby'
+
+
+def test_lobby_two_ready_creates_once_and_preserves_previous(simulated):
+    client, state, tokens = simulated
+    join(client, tokens['axis'])
+    base = client.get('/lan/lobby/state').json()
+    newconfig = {**base['config'], 'scenario_id':'IBS-S-01', 'seed':247,
+                 'optional_rules':{**base['config']['optional_rules'],'radar':True,'smoke':True},
+                 'radar_1942_variant': True}
+    cfg = client.post('/lan/lobby/config', json={'revision':base['revision'], 'config':newconfig})
+    assert cfg.status_code == 200, cfg.text
+    rev = cfg.json()['revision']
+    assert cfg.json()['ready'] == {'axis': False, 'allies': False}
+    first = client.post('/lan/lobby/ready', json={'revision':rev,'ready':True})
+    assert first.status_code == 200
+    assert len(state['games_created']) == 0
+    join(client, tokens['allies'])
+    second = client.post('/lan/lobby/ready', json={'revision':rev,'ready':True})
+    assert second.status_code == 200, second.text
+    assert second.json()['game_id'] == 'created-1'
+    assert second.json()['game_url'].startswith('/?game=created-1&side=allies&lan=1')
+    assert state['games_created'] == [{
+        'scenario_id':'IBS-S-01','seed':247,
+        'options': {'mode':'hotseat','ruleset_version':'night-v2','battle_report':False,
+                    'realistic_command':False,'optional_rules':newconfig['optional_rules'],
+                    'squall_hexes':[], 'radar_1942_variant':True, 'command_delay_mode':False},
+        'research_consent':{'allow':False}}]
+    assert server._room['previous_game_ids'] == ['game-test']
+    # A stale browser cannot accidentally create another match.
+    assert client.post('/lan/lobby/ready',json={'revision':rev,'ready':True}).status_code == 409
+    assert len(state['games_created']) == 1
+    assert server.ROOMFILE.is_file()
+    assert json.loads(server.ROOMFILE.read_text(encoding='utf-8'))['game_id'] == 'created-1'
+
+
+def test_lobby_edit_cancels_both_readiness_and_optimistic_lock(simulated):
+    client, state, tokens = simulated
+    join(client, tokens['axis'])
+    original = client.get('/lan/lobby/state').json()
+    assert client.post('/lan/lobby/ready',json={'revision':original['revision'],'ready':True}).status_code == 200
+    join(client, tokens['allies'])
+    cfg={**original['config'],'seed':22}
+    res = client.post('/lan/lobby/config',json={'revision':original['revision'],'config':cfg})
+    assert res.status_code == 200, res.text
+    assert res.json()['ready']=={'axis':False,'allies':False}
+    assert client.post('/lan/lobby/config',json={'revision':original['revision'],'config':cfg}).status_code==409
+    assert client.post('/lan/lobby/ready',json={'revision':original['revision'],'ready':True}).status_code==409
+    assert state['games_created']==[]
+
+
+def test_lobby_invalid_options_do_not_create_match(simulated):
+    client, state, tokens = simulated
+    join(client, tokens['axis'])
+    current=client.get('/lan/lobby/state').json()
+    for changes in ({'scenario_id':'fake-scenario'}, {'seed':True},
+                    {'optional_rules':{'radar':True}},
+                    {'squall_hexes':['A1']}, {'battle_report':'true'}):
+        cfg={**current['config'],**changes}
+        r=client.post('/lan/lobby/config',json={'revision':current['revision'],'config':cfg})
+        assert r.status_code == 422, (changes,r.text)
+    assert state['games_created']==[]
+
+
+def test_new_room_config_has_no_default_game_and_original_login_tickets_persist(simulated):
+    client, _, tickets = simulated
+    server._room['game_id'] = None
+    join(client,tickets['axis'])
+    assert client.get('/lan/status').json()['phase'] == 'lobby'
+    assert client.post('/lan/retry').status_code == 409
+    assert client.get('/api/games/game-test/view').status_code == 403
+    assert client.get('/lan/lobby').status_code == 200
+
+
+def test_game_page_contains_lobby_shortcut_and_cross_side_denied(simulated, monkeypatch, tmp_path):
+    client, _, tokens = simulated
+    (tmp_path / 'index.html').write_text('<html><body><div id="root"></div></body></html>', encoding='utf-8')
+    monkeypatch.setattr(server, 'FRONTEND', tmp_path)
+    join(client, tokens['axis'])
+    assert client.get('/?game=game-test&side=allies&lan=1', follow_redirects=False).status_code == 303
+    game = client.get('/?game=game-test&side=axis&lan=1')
+    assert game.status_code == 200
+    assert 'href="/lan/lobby"' in game.text
+    assert client.get('/lan/lobby').status_code == 200
+
+
+def test_game_creation_failure_keeps_existing_match_and_clears_ready(simulated, monkeypatch):
+    client, state, tickets = simulated
+    original = server.call_engine
+
+    async def fail_create(method, path, side=None, data=None, query=''):
+        if method == 'POST' and path == '/games':
+            return httpx.Response(422, json={'detail':'incompatible game rules'})
+        return await original(method, path, side, data, query)
+
+    monkeypatch.setattr(server, 'call_engine', fail_create)
+    join(client, tickets['axis'])
+    assert client.post('/lan/lobby/ready',json={'revision':1,'ready':True}).status_code == 200
+    join(client, tickets['allies'])
+    res = client.post('/lan/lobby/ready',json={'revision':1,'ready':True})
+    assert res.status_code == 422
+    assert '422' in res.json()['error']
+    assert res.json()['ready'] == {'axis':False,'allies':False}
+    assert server._room['game_id'] == 'game-test'
+    assert state['games_created'] == []

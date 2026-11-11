@@ -15,6 +15,7 @@ import secrets
 import socket
 from contextlib import asynccontextmanager
 from pathlib import Path
+from lan_unseal import PendingSubmissionStore, UnsealError  # IBS_LAN_UNSEAL_V1
 from urllib.parse import quote
 
 import httpx
@@ -68,6 +69,7 @@ app = FastAPI(title='Iron Bottom Sound LAN Duel', docs_url=None, redoc_url=None,
 _guard = asyncio.Lock()
 _room: dict = {}
 _last_error = ''
+_unseal_store = PendingSubmissionStore(ROOT / 'backend' / 'lan-unseal-checkpoint.json')
 
 
 def token_digest(token: str) -> str:
@@ -93,11 +95,17 @@ def origin_ok(request: Request) -> bool:
     return origin is None or origin == f'{request.url.scheme}://{request.headers.get("host", "")}'
 
 
+# IBS_LAN_INTERACTIVE_DICE_V1
+from lan_dice import DiceBridge
+_dice_bridge = DiceBridge(ROOT / 'backend' / 'lan-dice-audit.jsonl')
+_dice_bridge.install(upstream_api.engine.__class__)
+_dice_bridge.register(app, get_player, origin_ok)
+
 async def call_engine(method: str, path: str, side: str | None = None, data: bytes | None = None, query: str = '') -> httpx.Response:
     headers = {'X-Player-Side': side} if side else {}
     if data is not None:
         headers['Content-Type'] = 'application/json'
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream_api.app), base_url='http://internal', timeout=90) as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream_api.app), base_url='http://internal', timeout=(None if method == 'POST' and path.endswith('/advance') else 90)) as client:
         return await client.request(method, path + (('?' + query) if query else ''), headers=headers, content=data)
 
 
@@ -111,13 +119,15 @@ async def observation(side: str = 'axis') -> dict:
 async def advance_until_order_phase() -> None:
     """Only this gateway drives the original rules engine. Caller holds _guard."""
     global _last_error
+    if _room.get('gunnery_checkpoint'):
+        return
     for _ in range(24):
         state = await observation()
         phase = state.get('phase', '')
         if phase in ORDER_PHASES or phase == 'complete':
             _last_error = ''
             return
-        result = await call_engine('POST', f'/games/{_room["game_id"]}/advance', 'axis')
+        result = await _dice_bridge.advance(call_engine, f'/games/{_room["game_id"]}/advance')
         if result.status_code >= 400:
             raise RuntimeError(f'自动推进 {phase} 失败：{result.status_code} {result.text[:500]}')
     raise RuntimeError('自动推进超过24阶段，已停止以避免错误循环')
@@ -132,11 +142,22 @@ async def settle_after_submit() -> None:
             return
         before = f"回合{response.get('turn')} / {response.get('phase')}"
         print(f'[LAN DUEL] 双方封存 {before}，正在推进', flush=True)
-        result = await call_engine('POST', f'/games/{_room["game_id"]}/advance', 'axis')
+        result = await _dice_bridge.advance(call_engine, f'/games/{_room["game_id"]}/advance')
         if result.status_code >= 400:
             # Do not show potentially secret engine details to opposing players.
             print(f'[LAN DUEL] 原版引擎拒绝：HTTP {result.status_code} {result.text[:1000]}', flush=True)
             raise RuntimeError(f'规则引擎拒绝推进（HTTP {result.status_code}）；请查看主机终端的详细日志')
+        if response.get('phase') == 'gunnery':
+            # IBS_LAN_GUNNERY_REPORT_CHECKPOINT_V6
+            # The original gunnery advance completed and persisted.
+            # Hold subsequent phases until both viewers acknowledge.
+            _room['gunnery_checkpoint'] = {
+                'game_id': _room['game_id'], 'turn': response.get('turn'),
+                'acks': {'axis': False, 'allies': False}}
+            save_room()
+            print('[LAN GUNNERY] Waiting for report acknowledgements', flush=True)
+            _last_error = ''
+            return
         await advance_until_order_phase()
         after = await observation()
         print(f"[LAN DUEL] 推进成功：{before} → 回合{after.get('turn')} / {after.get('phase')}", flush=True)
@@ -156,6 +177,8 @@ async def reconcile_once() -> None:
         return
     async with _guard:
         try:
+            if _room.get('gunnery_checkpoint'):
+                return  # Report is awaiting both players; do not auto-advance.
             state = await observation()
             phase = state.get('phase')
             if phase in ORDER_PHASES:
@@ -430,7 +453,7 @@ async def lan_root(request: Request):
     # handles its own Home button without changing the URL.
     html = (FRONTEND / 'index.html').read_text(encoding='utf-8')
     shortcut = '<a href="/lan/lobby" style="position:fixed;right:18px;bottom:16px;z-index:2147483000;background:#123d59;color:white;padding:10px 15px;border:1px solid #73b8dc;border-radius:9px;font:600 14px sans-serif;text-decoration:none">返回联机准备大厅</a>'
-    html = html.replace('</body>', shortcut + '</body>')
+    html = html.replace('</body>', shortcut + '<script src="/lan/dice/client.js" defer></script></body>')
     return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
 
 
@@ -498,6 +521,38 @@ async def retry(request: Request):
                 'both_submitted': current.get('both_orders_submitted')}
 
 
+
+@app.get('/lan/gunnery/checkpoint')
+async def lan_gunnery_checkpoint(request: Request):
+    side = get_player(request)
+    # This route reveals no other-side private events or game state.
+    checkpoint = _room.get('gunnery_checkpoint')
+    if not checkpoint or checkpoint.get('game_id') != _room.get('game_id'):
+        return JSONResponse({'pending': False}, headers={'Cache-Control': 'no-store'})
+    return JSONResponse({'pending': True, 'turn': checkpoint['turn'],
+                         'acknowledged': bool(checkpoint['acks'].get(side))},
+                        headers={'Cache-Control': 'no-store'})
+
+@app.post('/lan/gunnery/ack')
+async def lan_gunnery_ack(request: Request):
+    side = get_player(request)
+    if not origin_ok(request):
+        raise HTTPException(403, 'Cross-origin acknowledgement rejected')
+    async with _guard:
+        checkpoint = _room.get('gunnery_checkpoint')
+        if not checkpoint or checkpoint.get('game_id') != _room.get('game_id'):
+            return {'pending': False}
+        if checkpoint['acks'].get(side) is not True:
+            checkpoint['acks'][side] = True
+            save_room()
+        if all(checkpoint['acks'].values()):
+            _room.pop('gunnery_checkpoint', None)
+            save_room()
+            # Do not make a UI HTTP request wait for several subsequent rolls.
+            asyncio.create_task(reconcile_once())
+            return {'pending': False, 'both_confirmed': True}
+        return {'pending': True, 'both_confirmed': False}
+
 @app.get('/lan/control', response_class=HTMLResponse)
 async def control(request: Request):
     get_player(request)
@@ -513,6 +568,28 @@ async def control(request: Request):
     document.querySelector('#retry').onclick=async()=>{const r=await fetch('/lan/retry',{method:'POST'});alert(JSON.stringify(await r.json()));update()};
     update();setInterval(update,3000);
     </script></body></html>''', headers={'Cache-Control':'no-store'})
+
+
+@app.post('/lan/retract-orders')
+async def lan_retract_orders(request: Request):
+    side = get_player(request)
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站撤回请求被拒绝')
+    if not _room.get('game_id'):
+        raise HTTPException(409, '当前房间尚未开始对局')
+    # Same lock as submission and adjudication: check+restore are atomic.
+    async with _guard:
+        view = await observation(side)
+        if (view.get('phase') not in ORDER_PHASES
+                or not view.get('own_orders_submitted')
+                or view.get('both_orders_submitted')):
+            raise HTTPException(409, '只有本方已封存且对方尚未封存时可以撤回')
+        state = upstream_api.get_game(_room['game_id'])
+        try:
+            outcome = _unseal_store.retract(state, side, upstream_api.engine, upstream_api.repository)
+        except UnsealError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return JSONResponse({'ok': True, **outcome}, headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/lan/status')
@@ -575,9 +652,16 @@ async def api_gateway(relative: str, request: Request):
                 raise HTTPException(409, '当前不是可下令阶段')
             if state.get('own_orders_submitted'):
                 raise HTTPException(409, '本阵营已经封存本阶段的命令')
+            # Persist the pristine state BEFORE the first successful seal.
+            _unseal_store.prepare(upstream_api.get_game(_room['game_id']), side, payload)
             res = await call_engine('POST', '/' + relative, side, json.dumps(payload).encode('utf-8'))
+            if res.status_code >= 400:
+                _unseal_store.discard_failed(_room['game_id'], side)
             if res.status_code < 400:
-                await settle_after_submit()
+                # IBS_LAN_INTERACTIVE_DICE_V2_ASYNC_SUBMIT
+                # Do NOT wait for a multi-roll battle in a browser's orders POST.
+                # The coordinator acquires _guard after this request releases it.
+                asyncio.create_task(reconcile_once())
             reply = response_from_upstream(res)
             if _last_error:
                 reply.headers['X-LAN-Advance-Error'] = '1'

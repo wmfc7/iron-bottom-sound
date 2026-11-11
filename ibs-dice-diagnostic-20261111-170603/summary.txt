@@ -1,0 +1,14 @@
+﻿Time: 2026-11-11T17:06:03.5597531+08:00
+PowerShell: 5.1.26100.9711
+Port: 8765
+LISTEN: YES; server PID=28832
+PROCESS: python CPU=17.5625 WorkingSetMB=80.2
+REQUEST: /join
+RESULT: HTTP=200 SECONDS=0.001711; curl_exit=0
+REQUEST: /lan/dice/health
+RESULT: HTTP=401 SECONDS=0.002124; curl_exit=0
+REQUEST: /lan/dice/state
+RESULT: HTTP=401 SECONDS=0.002845; curl_exit=0
+py-spy not installed. Optional: python -m pip install py-spy
+Diagnostic directory: C:\Users\19195\Desktop\iron-bottom-sound\ibs-dice-diagnostic-20261111-170603
+Do not share room tokens, cookie values, or logs with --locals without redaction.

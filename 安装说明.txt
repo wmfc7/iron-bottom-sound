@@ -1,0 +1,22 @@
+IBS Dice v6.2 - CRLF gateway anchor fix
+=======================================
+原因: v6.1 patch_gateway_v6.py 在 Windows CRLF 换行下，将 await advance_until_order_phase() 错误计为零处。
+此包仅包含 patch_gateway_v6.py 的修正版，不改规则引擎、随机数模块或对局存档。
+
+1. 先停止当前联机服务，备份旧版 patch_gateway_v6.py。
+2. 把压缩包内的 IBS_Dice_Gunnery_Privacy_v6/patch_gateway_v6.py 解压至游戏根目录并覆盖原文件。
+3. 在游戏根目录 PowerShell 中执行以下准确预检查 (与正式安装器一样保留原始字节中的 CRLF)：
+
+python -c "import sys,ast;from pathlib import Path;sys.path.insert(0,'IBS_Dice_Gunnery_Privacy_v6');from patch_gateway_v6 import patch_gateway;from patch_app_v6 import patch_app;ast.parse(patch_gateway(Path('lan_server.py').read_bytes().decode('utf8')));patch_app(Path('frontend/src/App.tsx').read_bytes().decode('utf8'));print('BYTE-EXACT PRECHECK OK')"
+
+4. 看到 BYTE-EXACT PRECHECK OK 后，再执行：
+python .\IBS_Dice_Gunnery_Privacy_v6\Install-IBS-Dice-v6.py
+
+5. 安装完成后按原版说明：
+cd frontend
+pnpm.cmd run build
+cd ..
+$env:IBS_DICE_SOURCE = "cpu_rdseed"
+python lan_server.py
+
+提示: 如果预检查失败，请提供新的完整报错，不要强行跳过锚点检查。

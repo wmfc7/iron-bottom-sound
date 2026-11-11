@@ -1,0 +1,42 @@
+IBS Dice Gunnery Privacy v6.1 - installer anchor compatibility fix
+
+Issue:
+  after-gunnery transition: expected one anchor, found 0; no files changed
+
+Cause:
+  The former patch_gateway_v6.py required these two adjacent lines:
+    await advance_until_order_phase()
+    after = await observation()
+  Local LAN gateways may contain code between them. The corrected patch
+  checks only for exactly one stage-forwarding call inside the
+  settle_after_submit() function, preserving adjacent or intervening code.
+
+Install (server must not be running):
+  1. Extract IBS_Dice_Gunnery_Privacy_v6 folder at the game root. Overwrite
+     the previous patch folder (NOT lan_server.py directly).
+  2. Open PowerShell at the game root:
+       python .\IBS_Dice_Gunnery_Privacy_v6\Install-IBS-Dice-v6.py
+  3. If installation succeeds:
+       cd frontend
+       pnpm.cmd run build
+       cd ..
+       $env:IBS_DICE_SOURCE = 'cpu_rdseed'
+       python lan_server.py
+
+IMPORTANT:
+  Do NOT run patch_gateway_v6.py directly. It is imported by the installer.
+  The installer is designed to check and compute all source modifications
+  before writing any of the game's four files. It creates backup copies.
+  Room data, SQLite databases and hardware RNG DLL are not modified.
+
+If installation reports a new anchor error:
+  DO NOT manually delete checks. Preserve your lan_server.py and send only
+  the contents of settle_after_submit() / reconcile_once() after redacting
+  secrets and tokens, so the patch can be adapted to your local code.
+
+Tests performed (simulation, not real Windows gameplay):
+  - Gate patch against base lobby v3 + dice v1/v2 integrations
+  - Variant with an extra statement after stage-advance
+  - Refuses unknown stage-forwarding logic
+  - Original v4/v5/v6 mocked regression tests
+  Total: 14 passed.

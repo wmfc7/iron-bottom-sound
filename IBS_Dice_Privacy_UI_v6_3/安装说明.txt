@@ -1,0 +1,57 @@
+铁底湾 IV / online 联机版：骰子判定信息保密 + 按钮位置修复 v6.3
+========================================================
+
+本补丁基于此前 v6/v6.2 交互式骰子文件制作，只改两份现有文件：
+  lan_dice.py
+  lan_dice_client.js
+不修改 lan_server.py、原版 engine.py、前端 React、CPU RDSEED DLL、存档或房间文件。
+
+【为何需要修复】
+旧版创建骰点请求时没有把 _actors、_rule_private_side 元数据保存进当前骰点对象。
+所以即使存在 _viewer_projection()，它也可能拿不到敌我舰船标识，造成详细判定信息泄漏。
+新版将舰船身份与阵营映射保留在服务器内存中，按当前登录玩家的阵营组成判定详情。
+敌方舰名/ID 不出现在骰子状态接口返回的 detail 中。对方私有规则参数同样按阵营过滤。
+未知/无法识别的舰船上下文采用 ***，不猜测可见性。
+
+【界面改动】
+“— 收起”按钮定位到骰子弹窗标题区域右上角；
+收起后，“展开投骰”按钮停留在弹窗宽度范围内的右上位置，而非浏览器最右上角。
+收起后可以操作背后的游戏页面；轮到本方投骰且遇到新判定时会自动展开。
+
+【安装】
+1. 等正在进行的掷骰/阶段裁决结束，停止 lan_server.py。不要在裁决暂停时重启。
+2. 把 ZIP 的 IBS_Dice_Privacy_UI_v6_3 整个文件夹解压至项目根目录：
+     C:\Users\19195\Desktop\iron-bottom-sound\IBS_Dice_Privacy_UI_v6_3
+3. 在 PowerShell 运行：
+     cd "C:\Users\19195\Desktop\iron-bottom-sound"
+     python .\IBS_Dice_Privacy_UI_v6_3\Install-Dice-Privacy-UI-v6_3.py
+4. 成功提示：IBS Dice privacy / modal controls v6.3 installed successfully.
+5. 按原来的启动方法运行（Windows x64 CPU RDSEED 示例）：
+     $env:IBS_DICE_SOURCE = "cpu_rdseed"
+     python lan_server.py
+6. 两个玩家的浏览器均按 Ctrl+F5；如果使用独立控制台，也刷新独立骰子页面。
+无需 pnpm build。
+
+【验证】
+- 轴心国投骰时，轴心国页面可以看到己方舰名，但敌舰改成 ***。
+- 同盟国玩家看到同一骰点时，只能看到同盟国舰名，轴心国舰名变成 ***。
+- 详细信息和规则参数不应在 F12 -> Network -> /lan/dice/state 的 JSON 中泄漏。
+- 检查投骰权限，依然只有服务器指定的一方可投。
+- 查看收起按钮是否在弹窗内右上，收起后展开按钮是否靠近原弹窗右上。
+
+【注意】
+- 这是针对骰子状态接口的保密修复，不声明覆盖原游戏所有其他 API 的战争迷雾策略。
+- 主机本身始终可访问进程/存档，因此不要给对手主机的系统访问权限。
+- 不保证你本机未上传的自定义改动与补丁完全匹配。安装器遇到未知锚点会拒绝写入。
+- 本补丁不改变 RNG、骰点结果、回合顺序或炮击结果弹窗行为。
+- 已通过 Linux 模拟环境下的测试；尚未在两台真实 Windows 浏览器上进行验收。
+
+【自动备份与回滚】
+安装器在项目根目录创建文件夹：
+  ibs-dice-privacy-ui-v6_3-backup-YYYYMMDD-HHMMSS
+其中保留修改前的 lan_dice.py 和 lan_dice_client.js。
+停止服务器后把这两个文件复制回项目根目录覆盖即可回滚。
+
+【测试】
+  python -m pytest .\IBS_Dice_Privacy_UI_v6_3\test_privacy_ui_v6_3.py -q
+（测试依赖 pytest、Node.js，作为验证用途，普通使用无需运行。）
