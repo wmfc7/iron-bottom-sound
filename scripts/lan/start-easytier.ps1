@@ -1,4 +1,4 @@
-# EasyTier dual-player entry. Windows PowerShell 5.1+.
+﻿# EasyTier dual-player entry v1.1. Windows PowerShell 5.1+.
 # Never reads, prints, embeds or copies network secrets.
 [CmdletBinding()]
 param(
@@ -29,39 +29,94 @@ function Test-IPv4([string]$Text) {
         -not $address.ToString().StartsWith('169.254.'))
 }
 
-function Get-EasyTierInterfaces {
+function Get-ActiveIPv4Interfaces {
     $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
-        $_.Status -eq 'Up' -and (
-            ($AdapterName -and $_.Name -eq $AdapterName) -or
-            (-not $AdapterName -and (($_.Name + ' ' + $_.InterfaceDescription) -match 'EasyTier'))
-        )
+        $_.Status -eq 'Up'
     })
     foreach ($adapter in $adapters) {
         $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
         foreach ($entry in $addresses) {
             if ((-not $entry.AddressState -or $entry.AddressState -eq 'Preferred') -and (Test-IPv4 $entry.IPAddress)) {
-                [PSCustomObject]@{ Address = [string]$entry.IPAddress; Adapter = [string]$adapter.Name }
+                [PSCustomObject]@{
+                    Address = [string]$entry.IPAddress
+                    Adapter = [string]$adapter.Name
+                    Description = [string]$adapter.InterfaceDescription
+                    InterfaceIndex = [int]$adapter.ifIndex
+                }
             }
         }
     }
 }
 
+function Get-EasyTierInterfaces {
+    # EasyTier's Windows TUN adapter may be named et_<suffix>, not "EasyTier".
+    # The upstream Windows issue tracker contains examples such as et_10_midi.
+    $all = @(Get-ActiveIPv4Interfaces)
+    if ($AdapterName) {
+        return @($all | Where-Object { $_.Adapter -eq $AdapterName })
+    }
+    return @($all | Where-Object {
+        (($_.Adapter + ' ' + $_.Description) -match '(?i)EasyTier') -or
+        ($_.Adapter -match '(?i)^et[_-]')
+    })
+}
+
+function Show-InterfaceChoices($items, [string]$heading) {
+    Write-Host $heading
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $item = $items[$i]
+        Write-Host (('[{0}] {1}  IPv4={2}  ifIndex={3}  ({4})' -f ($i + 1), $item.Adapter, $item.Address, $item.InterfaceIndex, $item.Description))
+    }
+}
+
+function Select-InterfaceAddress($items, [string]$heading) {
+    if ($items.Count -eq 0) { throw 'No usable IPv4 address was found on an UP network adapter.' }
+    Show-InterfaceChoices $items $heading
+    Write-Host 'Only select the EasyTier virtual adapter. Do NOT select Wi-Fi, Ethernet, VMware, Hyper-V, or another VPN adapter.'
+    $choice = Read-Host ('Select adapter/address number [1-' + $items.Count + ']')
+    $number = 0
+    if (-not [int]::TryParse($choice, [ref]$number) -or $number -lt 1 -or $number -gt $items.Count) {
+        throw 'Invalid adapter selection; no game server was started.'
+    }
+    return [string]$items[$number - 1].Address
+}
+
 function Resolve-EasyTierAddress {
-    $candidates = @(Get-EasyTierInterfaces | Sort-Object Address -Unique)
+    # Explicit IPv4 is authoritative, but must actually be assigned to an UP adapter.
+    # This permits adapter aliases that do not contain the word EasyTier.
+    $all = @(Get-ActiveIPv4Interfaces)
     if ($VpnIPv4) {
         if (-not (Test-IPv4 $VpnIPv4)) { throw 'VpnIPv4 must be a valid non-loopback IPv4 address.' }
-        $matches = @($candidates | Where-Object { $_.Address -eq $VpnIPv4 })
+        $matches = @($all | Where-Object {
+            $_.Address -eq $VpnIPv4 -and (-not $AdapterName -or $_.Adapter -eq $AdapterName)
+        })
         if ($matches.Count -ne 1) {
-            throw 'VpnIPv4 is not on the selected UP EasyTier adapter. Supply -AdapterName with its real Windows adapter name.'
+            Show-InterfaceChoices $all 'Active adapter IPv4 addresses:'
+            throw 'VpnIPv4 is not assigned to exactly one UP adapter (and the selected AdapterName, if supplied). Check EasyTier DHCP/IP assignment.'
         }
-        return $VpnIPv4
+        return [string]$matches[0].Address
     }
-    if ($candidates.Count -ne 1) {
-        Write-Host 'Detected adapter addresses:'
-        $candidates | ForEach-Object { Write-Host ('  ' + $_.Adapter + ': ' + $_.Address) }
-        throw 'Expected one EasyTier IPv4 address. Make sure EasyTier is connected. If Windows uses another adapter name, pass -AdapterName and optionally -VpnIPv4.'
+
+    if ($AdapterName) {
+        $named = @($all | Where-Object { $_.Adapter -eq $AdapterName })
+        if ($named.Count -eq 1) { return [string]$named[0].Address }
+        if ($named.Count -gt 1) { return Select-InterfaceAddress $named ('IPv4 addresses on adapter ' + $AdapterName + ':') }
+        Show-InterfaceChoices $all 'Active adapter IPv4 addresses:'
+        throw ('No usable IPv4 address found on adapter "' + $AdapterName + '". Check the exact InterfaceAlias and EasyTier DHCP status.')
     }
-    return $candidates[0].Address
+
+    $candidates = @(Get-EasyTierInterfaces | Sort-Object Adapter, Address -Unique)
+    if ($candidates.Count -eq 1) { return [string]$candidates[0].Address }
+    if ($candidates.Count -gt 1) {
+        return Select-InterfaceAddress $candidates 'Detected EasyTier adapter addresses:'
+    }
+
+    # Do not fail with an empty list: show all active adapters and let the user
+    # explicitly select the VPN interface after checking its identity.
+    if ($all.Count -gt 0) {
+        return Select-InterfaceAddress $all 'No adapter name matched EasyTier/et_. Active IPv4 adapters:'
+    }
+    throw 'No active adapter has a usable IPv4 address. Verify EasyTier is connected and has received a DHCP IPv4 address; then run Get-NetAdapter and Get-NetIPAddress.'
 }
 
 function Start-EasyTierIfRequested {
