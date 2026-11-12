@@ -293,7 +293,7 @@ _DISCIPLINE_SYSTEM_PROMPT = (
     "罗盘（航向=行进方向）：1=东北(+1,-1) 2=东南(+1,0) 3=南(0,+1) 4=西南(-1,+1) 5=西北(-1,0) "
     "6=北(0,-1)。\n"
     "鱼雷行进方向（≠bearing）：鱼雷实际航向 = ((该 MF 舰船航向 − 1 + relative) 在 1..6 回绕) + 1，"
-    "relative 见 torpedo_candidates 的 relative_heading：左舷 A/B=−1、X/Y=−2；右舷 A/B=+1、X/Y=+2。"
+    "relative 见 torpedo_candidates 的 relative_heading：左舷 A=−1、B=−2、X=−3、Y=−4；右舷 A=+1、B=+2、X=+3、Y=+4。"
     "例：舰船航向 3（南）配左舷/A → 鱼雷航向 2（东南）；配右舷/A → 航向 4（西南）；航向 1（东北）配"
     "左舷/X(−2) → 回绕到航向 5（西北）。\n"
     "瞄准：先用世界态帧算 舰→目标 的轴向位移 (Δq, Δr)，对到最接近的罗盘航向 D；再在 launch_positions "

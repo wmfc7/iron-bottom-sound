@@ -1211,12 +1211,12 @@ class IronBottomEngine:
         """完整剩余射程的几何直线，不表示当回合能走到的终点。
         逐格扣射程、触陆/越界截停；新时钟的区间位置由
         torpedo_clock_positions 计算，接触由 _assist_intercept 推算。
-        起点按B船尾外1格、X船头外1格锚点偏移。"""
+        起点为舰发射格沿行进方向相邻的一格（8.2.3 b 用户权威规则）。"""
         definition = self.rules.torpedoes[torpedo_type]
         setting = definition["settings"][setting_index]
         cycle = setting["speed"]
         position = self._torpedo_anchor_hex(
-            launch_hex, ship_heading or heading, launch_angle,
+            launch_hex, heading,
             columns=state.map_columns, rows=state.map_rows,
         )
         path: list[HexCoord] = [position]
@@ -1277,7 +1277,7 @@ class IronBottomEngine:
     ) -> tuple[HexCoord | None, int, str | None, int]:
         """逐 impulse 同时推进鱼雷与目标，返回 (交点, 鱼雷到交点距离, 截停原因, 第几回合)。
         与 _resolve_movement 同步移动语义一致：同格即接触，船撞静止雷也算；
-        发射回合目标在发射前领先 launch_at_mf 步。起点按锚点偏移落格。"""
+        发射回合目标在发射前领先 launch_at_mf 步。起点为舰发射格沿行进方向相邻格。"""
         if state.movement_timing == 'greg-courter-8-v1':
             if launch_interval is None:
                 if launch_at_mf != 0:
@@ -1291,7 +1291,7 @@ class IronBottomEngine:
         setting = definition["settings"][setting_index]
         cycle = setting["speed"]
         position = self._torpedo_anchor_hex(
-            launch_hex, ship_heading or heading, launch_angle,
+            launch_hex, heading,
             columns=state.map_columns, rows=state.map_rows,
         )
         target_position = target.position
@@ -1353,7 +1353,7 @@ class IronBottomEngine:
     ) -> tuple[HexCoord | None, int, str | None, int]:
         setting = self.rules.torpedoes[torpedo_type]['settings'][setting_index]
         cycle = setting['speed']
-        position = self._torpedo_anchor_hex(launch_hex, ship_heading, launch_angle,
+        position = self._torpedo_anchor_hex(launch_hex, heading,
                                            columns=state.map_columns, rows=state.map_rows)
         target_position = target.position
         if target_position is None:
@@ -1361,7 +1361,8 @@ class IronBottomEngine:
         remaining, distance = int(setting['range']), 0
         target_intervals = self.movement_intervals(max(0, target.current_speed))
         if launch_interval == 0 and position == target_position and position != launch_hex:
-            return position, 1, None, 0
+            # 起点相邻格即接触：0 步，雷击距离 = 1（与引擎每区间接触检查一致）。
+            return position, 0, None, 0
         # Every non-empty speed cycle spends at least one MF per complete cycle.
         if not any(cycle):
             return None, 1, 'immobile', 0
@@ -1487,11 +1488,13 @@ class IronBottomEngine:
             launch_interval=self._launch_interval(state, ship.id, int(combo['launch_at_mf']))
             if state.movement_timing == 'greg-courter-8-v1' else None,
         )
+        # 雷击距离：起点（舰旁相邻格）计入（青叶范例 3 步 = 4 格）。
+        range_distance = distance + 1
         result: dict[str, Any] = {
             **combo,
             "torpedo_heading": torpedo_heading,
             "launch_hex": combo["launch_hex"].label,
-            "distance": max(1, distance),
+            "distance": range_distance,
             "aspect": None,
             "modifier": None,
             "hit_probability": None,
@@ -1513,7 +1516,7 @@ class IronBottomEngine:
         result["friendly_risk"] = bool(friendly_ship_ids)
         if state.movement_timing == 'greg-courter-8-v1':
             setting = self.rules.torpedoes[torpedo_type]['settings'][int(combo['setting_index'])]
-            anchor = self._torpedo_anchor_hex(combo['launch_hex'], ship_heading, combo['launch_angle'],
+            anchor = self._torpedo_anchor_hex(combo['launch_hex'], torpedo_heading,
                                                columns=state.map_columns, rows=state.map_rows)
             result['first_turn_positions'] = [
                 position.label if position else None for position in self.torpedo_clock_positions(
@@ -1525,7 +1528,7 @@ class IronBottomEngine:
             source_bearing = ((torpedo_heading + 2) % 6) + 1
             relative = (source_bearing - target.heading) % 6
             aspect = "bow_stern" if relative in {0, 3} else "broadside"
-            modifier = self._torpedo_modifier(state, ship, target, distance)
+            modifier = self._torpedo_modifier(state, ship, target, range_distance)
             result["aspect"] = aspect
             result["modifier"] = modifier
             result["hit_probability"] = self.torpedo_hit_probability(aspect, modifier)
@@ -3269,7 +3272,7 @@ class IronBottomEngine:
             order.launch_angle or "A",
         )
         anchor_hex = self._torpedo_anchor_hex(
-            order.launch_hex, launch_heading, order.launch_angle or "A",
+            order.launch_hex, heading,
             columns=state.map_columns, rows=state.map_rows,
         )
         track = TorpedoTrack(
@@ -4196,7 +4199,8 @@ class IronBottomEngine:
         for track in [item for item in state.torpedo_tracks if item.contact_ship_ids]:
             attacker = state.ships[track.launcher_ship_id]
             definition = self.rules.torpedoes[track.torpedo_type]
-            distance = max(1, track.distance_travelled)
+            # 雷击距离：起点（舰旁相邻格）计入，规则书青叶范例 3 步 = 4 格。
+            distance = track.distance_travelled + 1
             candidates: list[tuple[int, ShipState, int, list[int], str]] = []
             for target_id in track.contact_ship_ids:
                 target = state.ships[target_id]
@@ -4208,6 +4212,10 @@ class IronBottomEngine:
                 candidates.append((adjusted, target, roll, dice, aspect))
             adjusted, target, roll, dice, aspect = max(candidates, key=lambda item: item[0])
             hits = min(self.torpedo_hit_count(aspect, adjusted), track.salvo_size)
+            # 玩家辅助表“鱼雷命中表”注意：10 格射程内，骰点为双 6 永远视为 1 次命中
+            # （对舰首/舰尾方向 13+ 阈值生效；修正后已有命中的情况不减少）。
+            if roll == 12 and distance <= 10:
+                hits = max(hits, 1)
             self._event(
                 state,
                 "torpedo_attack",
@@ -4268,23 +4276,18 @@ class IronBottomEngine:
     def _torpedo_anchor_hex(
         self,
         launch_hex: HexCoord,
-        ship_heading: int,
-        angle: str,
+        torpedo_heading: int,
         *,
         columns: int = MAP_COLUMNS,
         rows: int = MAP_ROWS,
     ) -> HexCoord:
-        """鱼雷算子起点：沿舰船头轴偏移（A/Y 在舰格；B 向船尾外 1 格；X 向船头外 1 格）。
+        """鱼雷算子起点：舰发射格沿鱼雷行进方向相邻的一格（用户权威规则 8.2.3 b）。
 
-        偏移取朝向以发射时点舰首为准（"朝船头方向/朝船头反方向一格"），与鱼雷行进方向无关。
-        锚点越出地图时退回舰发射格。
+        所有 A/B/X/Y 轨道都从舰旁的格子开始（规则书第 12 页青叶范例中
+        “雷击距离 4 格”= 相邻起点 1 格 + 行进 3 格）。相邻格越出地图时退回舰发射格。
         """
-        offset = int(self.rules.torpedo_launch_directions["launch_anchor"][angle])
-        if offset == 0:
-            return launch_hex
-        direction = ship_heading if offset > 0 else ((ship_heading + 2) % 6) + 1
         try:
-            return launch_hex.neighbor(direction, columns=columns, rows=rows)
+            return launch_hex.neighbor(torpedo_heading, columns=columns, rows=rows)
         except ValueError:
             return launch_hex
 

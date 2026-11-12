@@ -616,6 +616,8 @@ class TorpedoTrack(BaseModel):
     torpedo_type: str
     position: HexCoord
     heading: int = Field(ge=1, le=6)
+    # None preserves the current course of torpedoes in older saved games.
+    first_step_heading: int | None = Field(default=None, ge=1, le=6)
     speed_cycle: tuple[int, int, int]
     range_remaining: int = Field(ge=0)
     distance_travelled: int = Field(default=0, ge=0)
