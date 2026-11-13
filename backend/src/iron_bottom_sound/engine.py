@@ -1164,15 +1164,37 @@ class IronBottomEngine:
                 if not launcher.destroyed and not launcher.reload_turns_remaining and launcher.loaded > 0
             ]
             definition = self.rules.torpedoes.get(ship.torpedo_type or "", {})
+            # IBS_TORPEDO_SPEED_V3: compare this turn's FIRST torpedo-speed figure
+            # with the sealed movement order, not the ship's previous-turn speed.
+            planned_ship_speed = (
+                self.movement_cost(movement.plan, self.movement_commands(movement))
+                if movement else ship.current_speed
+            )
             settings = [
                 {"index": index, "speed": setting["speed"], "range": setting["range"]}
                 for index, setting in enumerate(definition.get("settings", []))
+                if int(setting["speed"][0]) >= planned_ship_speed
             ]
+            if movement and not settings and not blocked_reason:
+                blocked_reason = f"本回合舰速 {planned_ship_speed} MF 高于全部鱼雷首回合速度档位"
+                launchers = []
+            # First-turn travel uses the independent torpedo clock. MF0 gets
+            # the full torpedo-speed row; mid-turn launches cannot catch up.
+            for position in launch_positions:
+                interval = position.get("movement_interval", position["mf"])
+                position["first_turn_moves_by_setting"] = {
+                    str(setting["index"]): (
+                        len([i for i in self.movement_intervals(int(setting["speed"][0])) if i > interval])
+                        if state.movement_timing == 'greg-courter-8-v1'
+                        else max(0, int(setting["speed"][0]) - int(position["mf"]))
+                    ) for setting in settings
+                }
             candidates.append({
                 "ship_id": ship.id,
                 "launchers": launchers,
                 "launch_positions": launch_positions,
                 "settings": settings,
+                "planned_ship_speed": planned_ship_speed,
                 "blocked_reason": blocked_reason or ("缺少已封存的移动计划" if not movement else None),
             })
         return candidates
@@ -1450,7 +1472,7 @@ class IronBottomEngine:
         if launch_side not in launcher["sides"] or launch_angle not in launcher["angles"]:
             return None
         setting_index = int(launch.get("setting_index", 0))
-        if setting_index >= len(candidate["settings"]):
+        if not any(setting["index"] == setting_index for setting in candidate["settings"]):
             return None
         return {
             "ship_id": ship.id,
@@ -1896,7 +1918,7 @@ class IronBottomEngine:
             elif FiringArc(order.launch_side) not in launcher.arcs:
                 errors.append(f"{order.ship_id}:{launcher.id} cannot launch to {order.launch_side}")
             definition = self.rules.torpedoes.get(ship.torpedo_type or "")
-            if not definition or order.setting_index >= len(definition["settings"]):
+            if not definition or not (0 <= order.setting_index < len(definition["settings"])):
                 errors.append(f"{order.ship_id}: invalid torpedo speed setting {order.setting_index}")
             movement = next(
                 (
@@ -1911,6 +1933,15 @@ class IronBottomEngine:
                 errors.append(f"{order.ship_id}: missing sealed movement plan")
                 continue
             commands = self.movement_commands(movement)
+            # IBS_TORPEDO_SPEED_V3: enforce the same filter server-side.
+            ship_plan_speed = self.movement_cost(movement.plan, commands)
+            if definition and 0 <= order.setting_index < len(definition["settings"]):
+                first_torpedo_speed = int(definition["settings"][order.setting_index]["speed"][0])
+                if first_torpedo_speed < ship_plan_speed:
+                    errors.append(
+                        f"{order.ship_id}: torpedo speed {first_torpedo_speed} MF is lower than "
+                        f"the sealed ship speed {ship_plan_speed} MF"
+                    )
             trajectory, _ = self.movement_trajectory(
                 ship, movement.plan, commands,
                 columns=state.map_columns, rows=state.map_rows,
@@ -3846,6 +3877,9 @@ class IronBottomEngine:
                     "heading": track.heading,
                     "salvo_size": track.salvo_size,
                     "distance_travelled": track.distance_travelled,
+                    "moved_this_turn": moved_tracks.get(track.id, 0),
+                    "torpedo_speed_this_turn": track_allowance.get(track.id, 0),
+                    "movement_timing": state.movement_timing,
                     "range_remaining": track.range_remaining,
                     "path": full_path,
                 },
