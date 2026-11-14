@@ -12,6 +12,17 @@ export interface HexMapDims{map_columns?:number;map_rows?:number;printed_columns
 
 const points=(cx:number,cy:number)=>Array.from({length:6},(_,i)=>{const a=Math.PI/180*(60*i);return `${cx+HEX_SIZE*Math.cos(a)},${cy+HEX_SIZE*Math.sin(a)}`}).join(" ");
 const torpedoAsset=(track:TorpedoTrack)=>track.side==="axis"?`鱼雷${Math.min(3,track.salvo_size)}（日）.png`:`鱼雷${Math.min(2,track.salvo_size)}（美）.png`;
+// IBS_HEX_STACK_HOVER_V1: hover-only counter inventory. Never fetch hidden information.
+type HexStackItem = {
+  id: string;
+  label: string;
+  detail: string;
+  asset: string | null;
+  rotation: number;
+  side: Side | null;
+  kind: "ship" | "torpedo" | "marker";
+};
+
 const DEFAULT_VIEWPORT={tx:-100,ty:-250,k:1.8}; // 默认聚焦原想定交战区；“全图”可查看全部缓冲海域
 
 export interface MapMoveMode{
@@ -85,7 +96,75 @@ export function HexMap({ships,torpedoTracks,markers,onSelect,viewerSide,visibili
   setPanning(true);
   event.currentTarget.setPointerCapture(event.pointerId);
  };
+  // Hex stack hover uses only the already authorised, visible map props.
+  // Replaying an MF changes ship/torpedo coordinates; the stack updates with them.
+  const [stackHover,setStackHover]=useState<{key:string;left:number;top:number}|null>(null);
+  const stackByHex=useMemo(()=>{
+    const stack=new Map<string,HexStackItem[]>();
+    const add=(position:HexCoord,item:HexStackItem)=>{
+      const key=`${position.q}:${position.r}`;
+      const existing=stack.get(key);
+      if(existing)existing.push(item);else stack.set(key,[item]);
+    };
+    for(const ship of ships){
+      if(!ship.position)continue;
+      const moving=moveMode?.shipId===ship.id;
+      const position=moving&&moveMode?moveMode.currentHex:ship.position;
+      const heading=moving&&moveMode?moveMode.currentHeading:ship.heading;
+      const unknown=ship.identified===false;
+      add(position,{
+        id:`ship-${ship.id}`,
+        label:unknown?`未识别接触 ${ship.id.slice(-4).toUpperCase()}`:ship.name,
+        detail:ship.sunk?"沉没中":unknown?"未识别舰船":`舰首方向 ${heading}`,
+        asset:ship.sunk?"沉没中.png":ship.asset,
+        rotation:ship.sunk?0:headingRotation(heading),
+        side:ship.side,kind:"ship",
+      });
+    }
+    for(const torpedo of torpedoTracks){
+      // A hidden torpedo is not a visible counter; do not surface it in a hover list.
+      if(torpedo.hidden)continue;
+      add(torpedo.position,{
+        id:`torpedo-${torpedo.id}`,
+        label:`鱼雷 · ${torpedo.salvo_size}枚`,
+        detail:`航向 ${torpedo.heading} · 已走 ${torpedo.distance_travelled} 格`,
+        asset:torpedoAsset(torpedo),rotation:torpedoCounterRotation(torpedo.heading),
+        side:torpedo.side,kind:"torpedo",
+      });
+    }
+    for(const marker of markers){
+      if(!marker.position||["fire","sunk"].includes(marker.kind))continue;
+      add(marker.position,{
+        id:`marker-${marker.id}`,label:`标记 · ${marker.kind}`,
+        detail:"地图标记",asset:null,rotation:0,side:null,kind:"marker",
+      });
+    }
+    return stack;
+  },[ships,torpedoTracks,markers,moveMode]);
+  const hoveredItems=stackHover?stackByHex.get(stackHover.key):undefined;
+  const updateStackHover=(event:React.PointerEvent<SVGSVGElement>)=>{
+    if(event.pointerType==="touch"||event.buttons!==0||panning){
+      setStackHover(null);return;
+    }
+    const svg=svgRef.current;
+    if(!svg)return;
+    const hex=screenToHex(svg,event.clientX,event.clientY,viewport);
+    const key=hex?`${hex.q}:${hex.r}`:"";
+    const items=stackByHex.get(key);
+    if(!items||items.length<2){setStackHover(prev=>prev?null:prev);return;}
+    const rect=svg.getBoundingClientRect();
+    const x=event.clientX-rect.left,y=event.clientY-rect.top;
+    const panelWidth=Math.min(334,Math.max(0,rect.width-16));
+    const panelHeight=Math.min(rect.height-16,48+Math.ceil(items.length/3)*88);
+    const left=x+20+panelWidth<=rect.width?x+20:x-20-panelWidth;
+    const clampedLeft=Math.max(8,Math.min(left,rect.width-panelWidth-8));
+    const top=Math.max(8,Math.min(y-22,rect.height-panelHeight-8));
+    // Keep the panel stationary while the cursor traverses the same hex.
+    setStackHover(prev=>prev?.key===key?prev:{key,left:clampedLeft,top});
+  };
+
  const onSvgPointerMove=(event:React.PointerEvent<SVGSVGElement>)=>{
+   updateStackHover(event);
   const pan=panRef.current;if(!pan.active)return;
   setViewport(prev=>({...prev,tx:pan.tx+(event.clientX-pan.x),ty:pan.ty+(event.clientY-pan.y)}));
  };
@@ -128,7 +207,7 @@ export function HexMap({ships,torpedoTracks,markers,onSelect,viewerSide,visibili
  const dragPolyline=dragPath.length>0?dragPath.map(hex=>{const center=hexCenter(hex.q,hex.r);return `${center.x},${center.y}`}).join(" "):null;
  const fullMapLabel=`A 至 ${columnLabel(mapColumns-1)}、1 至 ${mapRows}`;
  const ariaLabel=hasBuffer?`${fullMapLabel} 固定扩展六角格战术地图；A 至 ${columnLabel(printedColumns-1)}、1 至 ${printedRows} 为原印刷区`:`${fullMapLabel} 战术地图`;
- return <div className={night?"map-frame night-map":"map-frame"}><svg ref={svgRef} viewBox={`0 0 ${worldW} ${worldH}`} role="img" aria-label={ariaLabel} className={panning?"panning":undefined} style={{touchAction:"none"}} onPointerDown={onSvgPointerDown} onPointerMove={onSvgPointerMove} onPointerUp={onSvgPointerEnd} onPointerCancel={onSvgPointerEnd}><defs><marker id="heading-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path fill="#f4d88c" d="M 0 0 L 10 5 L 0 10 z"/></marker><marker id="gunnery-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path fill="#ffd36a" d="M 0 0 L 10 5 L 0 10 z"/></marker></defs><g className="map-viewport" transform={`translate(${viewport.tx} ${viewport.ty}) scale(${viewport.k})`}>{heatCells}
+ return <div className={night?"map-frame night-map":"map-frame"}><svg ref={svgRef} viewBox={`0 0 ${worldW} ${worldH}`} role="img" aria-label={ariaLabel} className={panning?"panning":undefined} style={{touchAction:"none"}} onPointerDown={onSvgPointerDown} onPointerMove={onSvgPointerMove} onPointerUp={onSvgPointerEnd} onPointerCancel={onSvgPointerEnd} onPointerLeave={()=>setStackHover(null)}><defs><marker id="heading-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path fill="#f4d88c" d="M 0 0 L 10 5 L 0 10 z"/></marker><marker id="gunnery-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path fill="#ffd36a" d="M 0 0 L 10 5 L 0 10 z"/></marker></defs><g className="map-viewport" transform={`translate(${viewport.tx} ${viewport.ty}) scale(${viewport.k})`}>{heatCells}
   <defs><pattern id="night-rain-pattern" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="#35445e"/><path d="M-2 10L8 0M8 10L18 0" stroke="#8faac6" strokeWidth="1.6" opacity=".55"/></pattern></defs>
   <g className="hexes">{hexes}</g>
   {environment?.beams?.map(beam=>{if(beam.hexes.length<2)return null;const a=hexFromLabel(beam.hexes[0]),b=hexFromLabel(beam.hexes[beam.hexes.length-1]);const start=hexCenter(a.q,a.r),end=hexCenter(b.q,b.r);const dx=end.x-start.x,dy=end.y-start.y,length=Math.hypot(dx,dy);if(!length)return null;const inset=Math.min(24,length/4);const x1=start.x+dx/length*inset,y1=start.y+dy/length*inset,x2=end.x-dx/length*inset,y2=end.y-dy/length*inset;const source=ships.find(s=>s.id===beam.ship_id)?.name??beam.hexes[0],target=ships.find(s=>s.id===beam.target_id)?.name??beam.hexes[beam.hexes.length-1];const label=`${source} 探照灯 → ${target}${environment.preview?" · 预览":""}`;return <g key={beam.id} className={`night-beam-group${environment.preview?" preview":""}`} aria-label={label}><title>{label}</title><line className="night-beam-glow" x1={x1} y1={y1} x2={x2} y2={y2}/><line className="night-beam" x1={x1} y1={y1} x2={x2} y2={y2} markerEnd="url(#gunnery-arrow)"/>{environment.light_counter&&<image href={counterAssetUrl(environment.light_counter)} x={(x1+x2)/2-9} y={(y1+y2)/2-24} width="18" height="18"/>}<circle className="night-beam-target" cx={end.x} cy={end.y} r="25"/><text x={(x1+x2)/2} y={(y1+y2)/2+13}>探照灯{environment.preview?" · 预览":""}</text></g>})}
@@ -170,5 +249,18 @@ export function HexMap({ships,torpedoTracks,markers,onSelect,viewerSide,visibili
   })}
   {moveMode&&ships.filter(ship=>ship.id===moveMode.shipId&&ship.position).map(ship=>{const center=hexCenter(ship.position!.q,ship.position!.r);return <circle className="move-origin" key={ship.id} cx={center.x} cy={center.y} r="4"><title>真实起始位置 {hexLabel(ship.position!)}</title></circle>})}
   {markers.filter(marker=>marker.position&&!['fire','sunk'].includes(marker.kind)).map(marker=>{const center=hexCenter(marker.position!.q,marker.position!.r);return <circle className={`map-marker ${marker.kind}`} key={marker.id} cx={center.x} cy={center.y} r="7"><title>{marker.kind}</title></circle>})}
-  </g><g className="heading-compass" transform={`translate(82 ${worldH-92})`} aria-label="舰首方向：1右上、2右下、3下、4左下、5左上、6上"><rect x="-70" y="-70" width="140" height="150" rx="8"/><text className="compass-title" x="0" y="72">舰首方向</text>{directions.map(({heading,tip,label})=><g key={heading}><line x1="0" y1="0" x2={tip.x} y2={tip.y} markerEnd="url(#heading-arrow)"/><text x={label.x} y={label.y+3}>{heading}</text></g>)}<circle r="5"/></g></svg><div className="map-zoom-controls" role="group" aria-label="地图缩放"><button title="缩小" onClick={()=>zoomAtCenter(Math.exp(-0.1))}>−</button><button title="放大" onClick={()=>zoomAtCenter(Math.exp(0.1))}>＋</button><button title="聚焦交战区" onClick={focusCombat}>交战区</button><button title="查看完整扩展海图" onClick={()=>setViewport({tx:0,ty:0,k:1})}>全图</button></div><div className="map-area-legend">{hasBuffer?<><span>原印刷区 A–{columnLabel(printedColumns-1)} / 1–{printedRows}</span><span>浅色：扩展纯海缓冲区</span></>:<span>整图印刷海图 {fullMapLabel}</span>}<b>坐标固定 · 不世界平移</b></div></div>;
+  </g><g className="heading-compass" transform={`translate(82 ${worldH-92})`} aria-label="舰首方向：1右上、2右下、3下、4左下、5左上、6上"><rect x="-70" y="-70" width="140" height="150" rx="8"/><text className="compass-title" x="0" y="72">舰首方向</text>{directions.map(({heading,tip,label})=><g key={heading}><line x1="0" y1="0" x2={tip.x} y2={tip.y} markerEnd="url(#heading-arrow)"/><text x={label.x} y={label.y+3}>{heading}</text></g>)}<circle r="5"/></g></svg>{stackHover&&hoveredItems&&hoveredItems.length>1&&(
+    <div className="map-stack-preview" role="tooltip" style={{left:stackHover.left,top:stackHover.top}}>
+      <div className="map-stack-heading">{`六角格 ${hexLabel({q:Number(stackHover.key.split(":")[0]),r:Number(stackHover.key.split(":")[1])})} · ${hoveredItems.length} 枚棋子`}</div>
+      <div className="map-stack-grid">
+        {hoveredItems.map(item=><div key={item.id} className={`map-stack-item ${item.kind} ${item.side??"neutral"}`}>
+          <div className="map-stack-icon">
+            {item.asset?<img src={counterAssetUrl(item.asset)} style={{transform:`rotate(${item.rotation}deg)`}} alt=""/>:<span aria-hidden="true">◆</span>}
+          </div>
+          <span className="map-stack-name">{item.label}</span>
+          <span className="map-stack-detail">{item.detail}</span>
+        </div>)}
+      </div>
+    </div>
+  )}<div className="map-zoom-controls" role="group" aria-label="地图缩放"><button title="缩小" onClick={()=>zoomAtCenter(Math.exp(-0.1))}>−</button><button title="放大" onClick={()=>zoomAtCenter(Math.exp(0.1))}>＋</button><button title="聚焦交战区" onClick={focusCombat}>交战区</button><button title="查看完整扩展海图" onClick={()=>setViewport({tx:0,ty:0,k:1})}>全图</button></div><div className="map-area-legend">{hasBuffer?<><span>原印刷区 A–{columnLabel(printedColumns-1)} / 1–{printedRows}</span><span>浅色：扩展纯海缓冲区</span></>:<span>整图印刷海图 {fullMapLabel}</span>}<b>坐标固定 · 不世界平移</b></div></div>;
 }

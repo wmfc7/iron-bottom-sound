@@ -618,6 +618,7 @@ class TorpedoTrack(BaseModel):
     heading: int = Field(ge=1, le=6)
     # None preserves the current course of torpedoes in older saved games.
     first_step_heading: int | None = Field(default=None, ge=1, le=6)
+    launch_geometry_version: int = Field(default=0, ge=0)
     speed_cycle: tuple[int, int, int]
     range_remaining: int = Field(ge=0)
     distance_travelled: int = Field(default=0, ge=0)
@@ -924,7 +925,7 @@ class GameState(BaseModel):
     phase: Phase = Phase.REINFORCEMENT
     seed: int
     # Missing in historical saves: preserve the clock used by their event log.
-    movement_timing: Literal['legacy-mf-v1', 'greg-courter-8-v1'] = 'legacy-mf-v1'
+    movement_timing: Literal['legacy-mf-v1', 'greg-courter-8-v1', 'simple-mf-v2'] = 'legacy-mf-v1'
     # Active map size for this game (defaults to the fixed IBS-R-MAP-01 board).
     # printed_* may be smaller than map_* (a "printed" inner region the rest of
     # the board is sea buffer around); None means the whole map is the printed

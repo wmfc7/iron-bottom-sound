@@ -5,16 +5,14 @@ source:
   printed_section: "8.2.3 b"
 angles: [A, B, X, Y]
 relative_heading:
-  # 规则书 8.2.3 b 印刷图（用户 2026-11-12 复核：起点与方向均按原图修正）。
-  # 舰首 m：左舷 A=m-1、B=m-2、X=m-3、Y=m-4；右舷 A=m+1、B=m+2、X=m+3、Y=m+4。
-  # 环绕：0->6，7->1。原文“4 种发射方位 × 2 舷 = 8 种发射方向”。
-  # 自洽验证：青叶范例（舰首 2、左舷 X）：m-3=5，起点取舰旁相邻格，
-  # 3 步后与海伦娜相遇，雷击距离 = 3+1 = 4 格，与规则书第 12 页范例一致。
-  port: {A: -1, B: -2, X: -3, Y: -4}
-  starboard: {A: 1, B: 2, X: 3, Y: 4}
+  # Fixed continuing direction AFTER the initial adjacent cell.
+  port: {A: -1, B: -1, X: -2, Y: -2}
+  starboard: {A: 1, B: 1, X: 2, Y: 2}
+first_hex_relative_heading:
+  # First adjacent hex relative to firing ship's actual location.
+  # B/X start from different neighboring cells but cross in their second.
+  port: {A: -1, B: -2, X: -1, Y: -2}
+  starboard: {A: 1, B: 2, X: 1, Y: 2}
 launch_anchor:
-  # 用户权威规则（2026-11-12）：所有鱼雷轨道都从舰发射格的相邻格开始——
-  # 即沿鱼雷行进方向的第一格；相邻格越出地图时退回舰发射格。
-  # 不再按 A/B/X/Y 区分船头/船尾偏移。
-  mode: adjacent_along_track
-  fallback_to_launch_hex: true
+  mode: adjacent_using_first_hex
+  fallback_to_launch_hex: false

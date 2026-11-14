@@ -656,3 +656,22 @@ button.editor-modal-close:hover{color:#ffe9b0}
 @media(max-width:700px){.night-modal-mask{padding:8px}.night-modal{padding:16px;max-height:94vh}.loss-grid{grid-template-columns:1fr}.game>header{flex-wrap:wrap}.save-actions{flex-wrap:wrap;gap:6px}.night-orders input{max-width:100%}}
 .night-modal header button{flex-shrink:0;white-space:nowrap}
 @media(max-width:600px){.night-modal{padding:16px}.night-modal header{gap:12px}.night-modal header h2{font-size:20px}.night-modal header button{min-width:64px;padding:10px 14px}}
+
+/* IBS_HEX_STACK_HOVER_V1 — compact, noninteractive counter inventory beside a stacked hex. */
+.map-stack-preview{
+  position:absolute;z-index:25;width:min(334px,calc(100% - 16px));
+  max-height:calc(100% - 16px);overflow:hidden;pointer-events:none;
+  border:1px solid #b7a16f;border-radius:7px;background:rgba(16,28,30,.97);
+  box-shadow:0 8px 25px rgba(0,0,0,.52);color:#f3ead4;
+}
+.map-stack-heading{font-size:12px;font-weight:700;padding:8px 10px;color:#ecd29b;border-bottom:1px solid #59615b}
+.map-stack-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:7px;max-height:calc(100% - 35px);overflow:hidden}
+.map-stack-item{min-width:0;min-height:79px;display:flex;align-items:center;flex-direction:column;gap:2px;
+  padding:5px 3px;border:1px solid #46595a;background:#213133;border-radius:4px;text-align:center}
+.map-stack-item.axis{border-top:2px solid #c06853}.map-stack-item.allies{border-top:2px solid #668ebc}
+.map-stack-icon{height:37px;width:100%;display:flex;align-items:center;justify-content:center}
+.map-stack-icon img{width:50px;height:34px;object-fit:contain}
+.map-stack-icon span{font-size:25px;color:#c8b278}
+.map-stack-name{font-size:11px;font-weight:650;line-height:1.1;max-width:100%;overflow-wrap:anywhere}
+.map-stack-detail{font-size:10px;color:#aebcba;line-height:1.1;max-width:100%;overflow-wrap:anywhere}
+@media(max-width:480px){.map-stack-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}

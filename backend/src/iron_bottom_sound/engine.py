@@ -45,6 +45,7 @@ from .models import (
 from .scenario_rules import scenario_rules, state_scenario_rules
 from . import night, recognition
 from .rules_snapshot import active_state, bind_engine, pack, unpack
+# IBS_TORPEDO_BOOK_V4: original 8.2.3 launch rays and 8.2.4 source bearing
 
 
 RULES = ROOT / "resources" / "derived" / "structured" / "rules"
@@ -247,11 +248,11 @@ class IronBottomEngine:
         seed: int = 1,
         options: GameOptions | None = None,
         game_id: str | None = None,
-        movement_timing: str = 'greg-courter-8-v1',
+        movement_timing: str = 'simple-mf-v2',  # IBS_TORPEDO_SIMPLE_MF_V5
     ) -> GameState:
         identifier = game_id or str(uuid.uuid4())
         state = build_initial_state(identifier, scenario_id, seed, options or GameOptions())
-        if movement_timing not in {'legacy-mf-v1', 'greg-courter-8-v1'}:
+        if movement_timing not in {'legacy-mf-v1', 'greg-courter-8-v1', 'simple-mf-v2'}:
             raise ValueError(f'Unknown movement timing {movement_timing}')
         state.movement_timing = movement_timing
         if night.enabled(state):
@@ -460,6 +461,8 @@ class IronBottomEngine:
         frames.  Rebuild the visible tail backwards from the live counter;
         this touches only the copied observation, never adjudication state.
         """
+        if getattr(track, 'launch_geometry_version', 0) >= 4:
+            return  # True route history + actual launch hex; old saves still normalize.
         dq, dr = HexCoord.direction_delta(track.heading)
         visible_reversed = [track.position]
         cursor = track.position
@@ -1159,6 +1162,7 @@ class IronBottomEngine:
                     "sides": [arc.value for arc in launcher.arcs if arc in {FiringArc.PORT, FiringArc.STARBOARD}],
                     "angles": self.rules.torpedo_launch_directions["angles"],
                     "relative_heading": self.rules.torpedo_launch_directions["relative_heading"],
+                    "first_hex_relative_heading": self.rules.torpedo_launch_directions["first_hex_relative_heading"],
                 }
                 for launcher in ship.torpedo_launchers
                 if not launcher.destroyed and not launcher.reload_turns_remaining and launcher.loaded > 0
@@ -1173,11 +1177,7 @@ class IronBottomEngine:
             settings = [
                 {"index": index, "speed": setting["speed"], "range": setting["range"]}
                 for index, setting in enumerate(definition.get("settings", []))
-                if int(setting["speed"][0]) >= planned_ship_speed
             ]
-            if movement and not settings and not blocked_reason:
-                blocked_reason = f"本回合舰速 {planned_ship_speed} MF 高于全部鱼雷首回合速度档位"
-                launchers = []
             # First-turn travel uses the independent torpedo clock. MF0 gets
             # the full torpedo-speed row; mid-turn launches cannot catch up.
             for position in launch_positions:
@@ -1237,13 +1237,15 @@ class IronBottomEngine:
         definition = self.rules.torpedoes[torpedo_type]
         setting = definition["settings"][setting_index]
         cycle = setting["speed"]
+        first_heading = (self._torpedo_first_hex_from_course(ship_heading, heading, launch_angle)
+                         if ship_heading is not None else heading)
         position = self._torpedo_anchor_hex(
-            launch_hex, heading,
+            launch_hex, first_heading,
             columns=state.map_columns, rows=state.map_rows,
         )
         path: list[HexCoord] = [position]
         distance_travelled = 0
-        range_remaining = int(setting["range"])
+        range_remaining = max(0, int(setting["range"]) - 1)
         obstacle: str | None = None
         rel_turn = 0
         allowance = max(0, int(cycle[0]) - launch_at_mf)
@@ -1312,14 +1314,16 @@ class IronBottomEngine:
         definition = self.rules.torpedoes[torpedo_type]
         setting = definition["settings"][setting_index]
         cycle = setting["speed"]
+        first_heading = (self._torpedo_first_hex_from_course(ship_heading, heading, launch_angle)
+                         if ship_heading is not None else heading)
         position = self._torpedo_anchor_hex(
-            launch_hex, heading,
+            launch_hex, first_heading,
             columns=state.map_columns, rows=state.map_rows,
         )
         target_position = target.position
         target_speed = max(0, target.current_speed)
         distance = 0
-        range_remaining = int(setting["range"])
+        range_remaining = max(0, int(setting["range"]) - 1)
         rel_turn = 0
         allowance = max(0, int(cycle[0]) - launch_at_mf)
         target_moved = min(launch_at_mf, target_speed)
@@ -1375,12 +1379,13 @@ class IronBottomEngine:
     ) -> tuple[HexCoord | None, int, str | None, int]:
         setting = self.rules.torpedoes[torpedo_type]['settings'][setting_index]
         cycle = setting['speed']
-        position = self._torpedo_anchor_hex(launch_hex, heading,
-                                           columns=state.map_columns, rows=state.map_rows)
+        position = self._torpedo_anchor_hex(launch_hex,
+                         self._torpedo_first_hex_from_course(ship_heading, heading, launch_angle),
+                         columns=state.map_columns, rows=state.map_rows)
         target_position = target.position
         if target_position is None:
             return None, 1, None, 0
-        remaining, distance = int(setting['range']), 0
+        remaining, distance = max(0, int(setting['range']) - 1), 0
         target_intervals = self.movement_intervals(max(0, target.current_speed))
         if launch_interval == 0 and position == target_position and position != launch_hex:
             # 起点相邻格即接触：0 步，雷击距离 = 1（与引擎每区间接触检查一致）。
@@ -1401,7 +1406,7 @@ class IronBottomEngine:
                         pass
                 if relative_turn == 0 and interval < launch_interval:
                     continue
-                if interval in torpedo_intervals and (relative_turn > 0 or interval > launch_interval):
+                if remaining > 0 and interval in torpedo_intervals and (relative_turn > 0 or interval > launch_interval):
                     try:
                         proposed = position.neighbor(heading, columns=state.map_columns, rows=state.map_rows)
                     except ValueError:
@@ -1431,6 +1436,8 @@ class IronBottomEngine:
                     for launch_side in launcher["sides"]:
                         for launch_angle in launcher["angles"]:
                             for setting in candidate["settings"]:
+                                if int(setting["speed"][0]) < int(launch_position["mf"]):
+                                    continue
                                 combos.append({
                                     "ship_id": ship.id,
                                     "launcher_id": launcher["launcher_id"],
@@ -1472,7 +1479,8 @@ class IronBottomEngine:
         if launch_side not in launcher["sides"] or launch_angle not in launcher["angles"]:
             return None
         setting_index = int(launch.get("setting_index", 0))
-        if not any(setting["index"] == setting_index for setting in candidate["settings"]):
+        if not any(setting["index"] == setting_index and
+                   int(setting["speed"][0]) >= launch_at_mf for setting in candidate["settings"]):
             return None
         return {
             "ship_id": ship.id,
@@ -1538,18 +1546,17 @@ class IronBottomEngine:
         result["friendly_risk"] = bool(friendly_ship_ids)
         if state.movement_timing == 'greg-courter-8-v1':
             setting = self.rules.torpedoes[torpedo_type]['settings'][int(combo['setting_index'])]
-            anchor = self._torpedo_anchor_hex(combo['launch_hex'], torpedo_heading,
-                                               columns=state.map_columns, rows=state.map_rows)
+            anchor = self._torpedo_anchor_hex(
+                combo['launch_hex'], self._torpedo_first_hex_from_course(ship_heading, torpedo_heading, combo['launch_angle']),
+                columns=state.map_columns, rows=state.map_rows)
             result['first_turn_positions'] = [
                 position.label if position else None for position in self.torpedo_clock_positions(
-                    state, anchor, torpedo_heading, int(setting['speed'][0]), int(setting['range']),
+                    state, anchor, torpedo_heading, int(setting['speed'][0]), max(0, int(setting['range']) - 1),
                     launch_interval=result['launch_interval'],
                 )
             ]
         if intercept_hex:
-            source_bearing = ((torpedo_heading + 2) % 6) + 1
-            relative = (source_bearing - target.heading) % 6
-            aspect = "bow_stern" if relative in {0, 3} else "broadside"
+            aspect = self._torpedo_origin_aspect(combo['launch_hex'], intercept_hex, target.heading)
             modifier = self._torpedo_modifier(state, ship, target, range_distance)
             result["aspect"] = aspect
             result["modifier"] = modifier
@@ -1933,14 +1940,13 @@ class IronBottomEngine:
                 errors.append(f"{order.ship_id}: missing sealed movement plan")
                 continue
             commands = self.movement_commands(movement)
-            # IBS_TORPEDO_SPEED_V3: enforce the same filter server-side.
-            ship_plan_speed = self.movement_cost(movement.plan, commands)
+            # IBS_TORPEDO_INLINE_MF_V6: speed filtering uses launch MF, not ship speed.
             if definition and 0 <= order.setting_index < len(definition["settings"]):
                 first_torpedo_speed = int(definition["settings"][order.setting_index]["speed"][0])
-                if first_torpedo_speed < ship_plan_speed:
+                if first_torpedo_speed < order.launch_at_mf:
                     errors.append(
-                        f"{order.ship_id}: torpedo speed {first_torpedo_speed} MF is lower than "
-                        f"the sealed ship speed {ship_plan_speed} MF"
+                        f"{order.ship_id}: launch MF {order.launch_at_mf} exceeds "
+                        f"torpedo first-turn speed {first_torpedo_speed} MF"
                     )
             trajectory, _ = self.movement_trajectory(
                 ship, movement.plan, commands,
@@ -3302,10 +3308,21 @@ class IronBottomEngine:
             order.launch_side or "port",
             order.launch_angle or "A",
         )
+        first_hex_heading = self._torpedo_first_hex_heading(
+            launch_heading, order.launch_side or 'port', order.launch_angle or 'A')
         anchor_hex = self._torpedo_anchor_hex(
-            order.launch_hex, heading,
+            order.launch_hex, first_hex_heading,
             columns=state.map_columns, rows=state.map_rows,
         )
+        if anchor_hex == order.launch_hex or self._terrain_impassable(state, anchor_hex):
+            self._event(
+                state, 'torpedo_launch_cancelled',
+                f'{ship.name} 的初始鱼雷入格无效，发射取消',
+                payload={'ship_id': ship.id, 'planned_hex': order.launch_hex.label,
+                         'first_heading': first_hex_heading},
+                rule=self._rule('IBS-R-08.2.3', 11, '8.2.3 鱼雷放置'),
+            )
+            return None
         track = TorpedoTrack(
             id=f"TT-{state.turn}-{ship.id}-{launcher.id}-{len(state.torpedo_tracks)+1}",
             side=ship.side,
@@ -3313,11 +3330,13 @@ class IronBottomEngine:
             torpedo_type=ship.torpedo_type or "",
             position=anchor_hex,
             heading=heading,
+            first_step_heading=first_hex_heading,
+            launch_geometry_version=4,
             speed_cycle=tuple(setting["speed"]),
-            range_remaining=int(setting["range"]),
+            range_remaining=max(0, int(setting["range"]) - 1),
             launched_turn=state.turn,
             salvo_size=order.count,
-            launch_position=anchor_hex,
+            launch_position=order.launch_hex,
             launch_side=order.launch_side,
             launch_angle=order.launch_angle,
             traversed_hexes=[anchor_hex],
@@ -3372,12 +3391,15 @@ class IronBottomEngine:
         No ship, track, order or hidden position is read. LLM transports and local
         observations share this output rather than maintaining their own table.
         """
-        if state.movement_timing == 'legacy-mf-v1':
+        if state.movement_timing in ('legacy-mf-v1', 'simple-mf-v2'):
             return {
                 'version': state.movement_timing,
-                'instruction': '本局是旧存档，使用顺序MF时钟，不套用Greg Courter八区间表。'
-                               '途中发射首回合可走格数为max(0,鱼雷速度减发射舰已用MF)。'
-                               '保持本局合法候选与旧时钟，不把新局规则用于旧局。',
+                'instruction': '顺序MF计时：每个MF先执行有计划的舰船动作，再执行有余额的鱼雷移动；'
+                               '鱼雷发射当回合可移动格数=max(0,首段雷速-发射MF)，'
+                               '不受发射舰总MF限制。之后回合按雷速周期各段完整移动。'
+                               '碰撞、搁浅、出界及射程用尽仍可提前结束。',
+                'worked_example': {'torpedo_speed': 8,
+                                   'first_turn_hexes_by_launch_mf': {str(mf): 8-mf for mf in range(5)}},
             }
         chart = self.rules.movement_impulses
         example_speed, launch_mf, torpedo_speed = 4, 2, 8
@@ -3450,7 +3472,7 @@ class IronBottomEngine:
 
     def movement_clock_positions(self, state: GameState, start: HexCoord, mf_positions: list[HexCoord]) -> list[HexCoord]:
         """Read-only path including time zero; shared by all command planners."""
-        if state.movement_timing == 'legacy-mf-v1':
+        if state.movement_timing in ('legacy-mf-v1', 'simple-mf-v2'):
             return [start, *mf_positions]
         program = [(position, 1) for position in mf_positions]
         return [start, *(step[0] for step in self._interval_program(program, start, 1))]
@@ -3488,6 +3510,51 @@ class IronBottomEngine:
             result.append(position)
         return result
 
+    # IBS_LAN_MOVEMENT_REPLAY_V1: audit-friendly player-private animation frames.
+    def _record_movement_replay_frame(self, state: GameState, interval: int, paths: dict) -> None:
+        # Never send unobserved enemy movements or invisible torpedoes to the other side.
+        # These events are replay-only; the authoritative movement and contacts are unchanged.
+        for viewer in Side:
+            ships = []
+            for ship in state.ships.values():
+                if ship.side != viewer or ship.position is None:
+                    continue
+                heading = ship.heading
+                ship_path = paths.get(ship.id)
+                if interval > 0 and ship_path and interval <= len(ship_path):
+                    heading = ship_path[interval - 1][1]
+                ships.append({
+                    "id": ship.id,
+                    "position": ship.position.model_dump(mode="json"),
+                    "heading": heading,
+                })
+            torpedoes = []
+            for track in state.torpedo_tracks:
+                if track.side != viewer:
+                    continue
+                # Explicit allowlist prevents enemy ship IDs in contact lists leaking.
+                torpedoes.append({
+                    "id": track.id, "side": track.side.value,
+                    "launcher_ship_id": track.launcher_ship_id,
+                    "torpedo_type": track.torpedo_type,
+                    "position": track.position.model_dump(mode="json"),
+                    "heading": track.heading,
+                    "range_remaining": track.range_remaining,
+                    "distance_travelled": track.distance_travelled,
+                    "salvo_size": track.salvo_size,
+                    "launch_position": track.launch_position.model_dump(mode="json") if track.launch_position else None,
+                    "launch_side": track.launch_side,
+                    "launch_angle": track.launch_angle,
+                    "traversed_hexes": [hex_.model_dump(mode="json") for hex_ in track.traversed_hexes],
+                    "contact_ship_ids": [],
+                    "hidden": track.hidden,
+                })
+            self._event(
+                state, "movement_replay_frame", f"同步移动回放：MF {interval}",
+                payload={"secret_side": viewer.value, "movement_interval": interval,
+                         "animated_ships": ships, "animated_torpedoes": torpedoes,
+                         "movement_timing": state.movement_timing},
+            )
     def _resolve_movement(self, state: GameState) -> None:
         greg_clock = state.movement_timing == 'greg-courter-8-v1'
         self._resolve_sinking_drift(state)
@@ -3604,6 +3671,7 @@ class IronBottomEngine:
                 moved_tracks[track.id] = 0
         if greg_clock:
             self._check_torpedo_contacts(state, movement_interval=0)
+        self._record_movement_replay_frame(state, 0, paths)
         for impulse in range(maximum_impulses):
             previous_ship_positions = {ship.id: ship.position for ship in state.ships.values() if ship.position}
             # IBS-R-MAP-01: the play area has a fixed sea buffer outside the
@@ -3850,10 +3918,11 @@ class IronBottomEngine:
             # stationary hex.
             self._check_torpedo_contacts(
                 state,
-                previous_ship_positions=previous_ship_positions if greg_clock else None,
-                previous_track_positions=previous_track_positions if greg_clock else None,
+                previous_ship_positions=previous_ship_positions if state.movement_timing != 'legacy-mf-v1' else None,
+                previous_track_positions=previous_track_positions if state.movement_timing != 'legacy-mf-v1' else None,
                 movement_interval=impulse + 1,
             )
+            self._record_movement_replay_frame(state, impulse + 1, paths)
             if greg_clock:
                 self._event(
                     state, 'movement_interval_resolved', f'移动区间 {impulse + 1}/8 结算完成',
@@ -3983,7 +4052,7 @@ class IronBottomEngine:
         for track in state.torpedo_tracks:
             if track.contact_ship_ids:
                 continue
-            greg_clock = state.movement_timing == 'greg-courter-8-v1'
+            greg_clock = state.movement_timing != 'legacy-mf-v1'
             contacts = []
             snapshots = {}
             for ship in state.ships.values():
@@ -3997,7 +4066,10 @@ class IronBottomEngine:
                     'same_hex' if ship.position == track.position else None)
                 # A newly launched torpedo cannot attack a target sharing its launcher's hex.
                 launcher = state.ships[track.launcher_ship_id]
-                if greg_clock and track.distance_travelled == 0 and ship.position == launcher.position:
+                origin = (track.launch_position
+                          if getattr(track, 'launch_geometry_version', 0) >= 4 and track.launch_position
+                          else launcher.position)
+                if greg_clock and track.distance_travelled == 0 and ship.position == origin:
                     continue
                 if kind is None:
                     continue
@@ -4239,7 +4311,7 @@ class IronBottomEngine:
             for target_id in track.contact_ship_ids:
                 target = state.ships[target_id]
                 snapshot = state.torpedo_contact_snapshots.get(track.id, {}).get(target_id)
-                contact_target = target.model_copy(update={'heading': snapshot.heading, 'current_speed': snapshot.speed}) if snapshot else target
+                contact_target = target.model_copy(update={'position': snapshot.position, 'heading': snapshot.heading, 'current_speed': snapshot.speed}) if snapshot else target
                 roll, dice = self._roll_2d6(state)
                 adjusted = roll + self._torpedo_modifier(state, attacker, contact_target, distance)
                 aspect = self._torpedo_track_aspect(track, contact_target)
@@ -4307,6 +4379,22 @@ class IronBottomEngine:
         relative = int(self.rules.torpedo_launch_directions["relative_heading"][side][angle])
         return ((ship_heading - 1 + relative) % 6) + 1
 
+    def _torpedo_first_hex_heading(self, ship_heading: int, side: str, angle: str) -> int:
+        """IBS 8.2.3(b): initial adjacent hex for the four A/B/X/Y rays."""
+        rel = int(self.rules.torpedo_launch_directions['first_hex_relative_heading'][side][angle])
+        return ((ship_heading - 1 + rel) % 6) + 1
+
+    def _torpedo_first_hex_from_course(self, ship_heading: int, heading: int, angle: str) -> int:
+        """Infer the firing side for assistant previews (which pass a course)."""
+        relative = (heading - ship_heading) % 6
+        if relative in (1, 2):
+            side = 'starboard'
+        elif relative in (4, 5):
+            side = 'port'
+        else:
+            raise ValueError('Torpedo course is not on either firing side')
+        return self._torpedo_first_hex_heading(ship_heading, side, angle)
+
     def _torpedo_anchor_hex(
         self,
         launch_hex: HexCoord,
@@ -4326,10 +4414,33 @@ class IronBottomEngine:
             return launch_hex
 
     @staticmethod
+    def _torpedo_origin_aspect(launch_hex: HexCoord, target_hex: HexCoord, target_heading: int) -> str:
+        """IBS 8.2.4: direction from target toward the INITIAL firing hex.
+
+        Six angular sectors are used for off-axis launch positions; only
+        target-heading and the diametrically opposite sector count bow/stern.
+        """
+        dq, dr = launch_hex.q - target_hex.q, launch_hex.r - target_hex.r
+        if not (dq or dr):
+            return 'broadside'  # Launch-hex contacts are invalid elsewhere.
+        # Axial coordinates -> 2D vectors. Scale y by sqrt(3) only; this
+        # is equivalent to (q + r/2, sqrt(3)*r/2).
+        direction = max(range(1, 7), key=lambda h: (
+            (2*dq + dr) * (2*HexCoord.direction_delta(h)[0] + HexCoord.direction_delta(h)[1])
+            + 3*dr*HexCoord.direction_delta(h)[1]
+        ))
+        return 'bow_stern' if (direction - target_heading) % 6 in (0, 3) else 'broadside'
+
+    @staticmethod
     def _torpedo_track_aspect(track: TorpedoTrack, target: ShipState) -> str:
+        if (getattr(track, 'launch_geometry_version', 0) >= 4
+                and track.launch_position is not None and target.position is not None):
+            return IronBottomEngine._torpedo_origin_aspect(
+                track.launch_position, target.position, target.heading)
+        # Old save games retain the historical course-based calculation.
         source_bearing = ((track.heading + 2) % 6) + 1
         relative = (source_bearing - target.heading) % 6
-        return "bow_stern" if relative in {0, 3} else "broadside"
+        return 'bow_stern' if relative in {0, 3} else 'broadside'
 
     def _resolve_fire(self, state: GameState) -> None:
         for ship in state.ships.values():

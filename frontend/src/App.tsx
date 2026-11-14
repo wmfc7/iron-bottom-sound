@@ -31,6 +31,7 @@ import { DamageChips } from "./damageSummary";
 import { FleetRoster } from "./FleetRoster";
 import { GunneryOutcomeModal } from "./GunneryOutcomeModal";
 import { HexMap } from "./HexMap";
+import type {IBSMovementFrame} from "./MovementReplay";
 import { HexMoveEditor } from "./HexMoveEditor";
 import { PlanSheet } from "./PlanSheet";
 import { RealisticRulesModal } from "./RealisticRulesModal";
@@ -365,6 +366,60 @@ export default function App() {
     viewer: Side;
     turn: number;
   } | null>(null);
+  // IBS_LAN_MOVEMENT_REPLAY_V1: replay side-filtered snapshots after settlement.
+  const [ibsMovementReplay, setIbsMovementReplay] = useState<IBSMovementFrame[] | null>(null);
+  const ibsPrevPhaseView = useRef<Observation | undefined>(undefined);
+  const ibsSeenReplay = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    setIbsMovementReplay(null);
+    ibsPrevPhaseView.current = undefined;
+    ibsSeenReplay.current.clear();
+  }, [game]);
+  useEffect(() => {
+    const before = ibsPrevPhaseView.current;
+    ibsPrevPhaseView.current = view;
+    if (!LAN_MODE || !before || !view || !game || before.game_id !== view.game_id) return;
+    if (before.phase !== "torpedo_planning" || view.phase === "torpedo_planning") return;
+    const key = `${game}:${side}:${before.turn}`;
+    if (ibsSeenReplay.current.has(key)) return;
+    ibsSeenReplay.current.add(key);
+    gameEvents(game, side, 0).then(events => {
+      // A second view poll must not cancel the playback requested for this turn.
+      if (ibsPrevPhaseView.current?.game_id !== view.game_id) return;
+      const frames: IBSMovementFrame[] = events
+        .filter(event => event.turn === before.turn && event.type === "movement_replay_frame")
+        .map(event => {
+          const p = event.payload ?? {};
+          return {interval: Number(p.movement_interval),
+                  ships: (Array.isArray(p.animated_ships) ? p.animated_ships : []) as IBSMovementFrame["ships"],
+                  torpedoes: (Array.isArray(p.animated_torpedoes) ? p.animated_torpedoes : []) as IBSMovementFrame["torpedoes"]};
+        })
+        .filter(frame => Number.isInteger(frame.interval) && frame.interval >= 0 && frame.interval <= 100)
+        .sort((a, b) => a.interval - b.interval);
+      if (frames.length >= 2 && frames.every((frame, i) => frame.interval === i)) {
+        setIbsMovementReplay(frames);
+      }
+    }).catch(() => {/* Do not interrupt gameplay if a replay is unavailable. */});
+  }, [view, game, side]);
+  // IBS_TORPEDO_INLINE_MF_V6: animate the actual HexMap, never open a replay overlay.
+  const [ibsInlineIndex, setIbsInlineIndex] = useState(0);
+  const [ibsInlinePaused, setIbsInlinePaused] = useState(false);
+  useEffect(() => { setIbsInlineIndex(0); setIbsInlinePaused(false); }, [ibsMovementReplay]);
+  useEffect(() => {
+    if (!ibsMovementReplay || ibsInlinePaused || ibsInlineIndex >= ibsMovementReplay.length - 1) return;
+    const handle = window.setTimeout(() => setIbsInlineIndex(value => Math.min(value + 1, ibsMovementReplay.length - 1)), 620);
+    return () => window.clearTimeout(handle);
+  }, [ibsMovementReplay, ibsInlineIndex, ibsInlinePaused]);
+  const ibsInlineFrame = ibsMovementReplay?.[Math.min(ibsInlineIndex, ibsMovementReplay.length - 1)] ?? null;
+  const ibsInlineShips = useMemo(() => {
+    if (!ibsInlineFrame || !view) return view?.ships ?? [];
+    const locations = new Map(ibsInlineFrame.ships.map(item => [item.id, item]));
+    // Do not reveal final enemy locations or hidden markers before their actual time.
+    return view.ships.filter(ship => ship.side === side).map(ship => {
+      const snap = locations.get(ship.id);
+      return snap ? {...ship, position: snap.position, heading: snap.heading} : {...ship, position: null};
+    });
+  }, [view, ibsInlineFrame, side]);
   // IBS_LAN_GUNNERY_OUTCOME_V6
   // Reuse the original side-filtered artillery report instead of exposing raw
   // unfiltered world-state events. The server holds its next phase until both
@@ -1191,6 +1246,7 @@ export default function App() {
     );
   return (
     <main className={`game ${mode}`}>
+
       <header>
         <div>
           <p className="eyebrow">
@@ -1335,14 +1391,30 @@ export default function App() {
                 {selected.name} · 火力热力
               </div>
             )}
+            {LAN_MODE && ibsMovementReplay && (
+              <div className="ibs-inline-mf-controls" role="group" aria-label="地图同步移动逐格播放"
+                   style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:8, padding:"8px 10px", background:"#182c31", border:"1px solid #68818d", borderRadius:8}}>
+                <strong>同步移动 MF {ibsInlineFrame?.interval ?? 0}/{ibsMovementReplay[ibsMovementReplay.length-1].interval}</strong>
+                <span style={{fontSize:12,color:"#d2e3e8"}}>
+                  {(ibsInlineFrame?.torpedoes ?? []).map(track => {
+                    const first = ibsMovementReplay.flatMap(frame => frame.torpedoes).find(item => item.id === track.id);
+                    return `${track.id.slice(-5)} 已移动 ${Math.max(0, track.distance_travelled - (first?.distance_travelled ?? 0))} 格`;
+                  }).join(" · ") || "暂无活跃己方鱼雷"}
+                </span>
+                <button type="button" onClick={() => setIbsInlinePaused(value => !value)}>{ibsInlinePaused?"继续":"暂停"}</button>
+                <button type="button" onClick={() => {setIbsInlinePaused(true);setIbsInlineIndex(value=>Math.max(0,value-1));}} disabled={ibsInlineIndex===0}>上一格</button>
+                <button type="button" onClick={() => {setIbsInlinePaused(true);setIbsInlineIndex(value=>Math.min(ibsMovementReplay.length-1,value+1));}} disabled={ibsInlineIndex===ibsMovementReplay.length-1}>下一格</button>
+                <button type="button" onClick={() => setIbsMovementReplay(null)}>完成 / 跳过</button>
+              </div>
+            )}
             <HexMap
               dims={view}
               environment={nightEnvironment??view.environment}
               terrain={view.terrain}
               onHexPick={view.phase==="gunnery"?setNightHex:undefined}
-              ships={view.ships}
-              torpedoTracks={view.torpedo_tracks}
-              markers={view.markers}
+              ships={ibsInlineFrame ? ibsInlineShips : view.ships}
+              torpedoTracks={ibsInlineFrame ? ibsInlineFrame.torpedoes : view.torpedo_tracks}
+              markers={ibsInlineFrame ? [] : view.markers}
               onSelect={setSelected}
               viewerSide={side}
               visibility={view.visibility}
