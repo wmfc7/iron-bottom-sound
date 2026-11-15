@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import os
 from typing import Any
 
 import yaml
@@ -28,7 +29,7 @@ from .models import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(os.environ.get("IBS_ROOT", Path(__file__).resolve().parents[3])).resolve()
 STRUCTURED = ROOT / "resources" / "derived" / "structured"
 _CUSTOM_SCENARIOS: dict[str, dict[str, Any]] = {}
 

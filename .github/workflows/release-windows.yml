@@ -1,0 +1,35 @@
+name: Windows release packages
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Build Guest package
+        shell: pwsh
+        run: ./scripts/build/Build-Guest.ps1
+      - name: Build Host package
+        shell: pwsh
+        run: ./scripts/build/Build-Host.ps1 -DiceMode cpu_rdseed
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/IBS-Host-Windows-x64.zip
+            dist/IBS-Guest-Windows-x64.zip

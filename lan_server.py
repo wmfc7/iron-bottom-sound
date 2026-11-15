@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from lan_unseal import PendingSubmissionStore, UnsealError  # IBS_LAN_UNSEAL_V1
@@ -31,7 +32,7 @@ try:
 except ImportError as exc:
     raise SystemExit('请先在项目根目录安装：python -m pip install -e .') from exc
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.environ.get("IBS_ROOT", Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent)).resolve()
 FRONTEND = ROOT / 'frontend' / 'dist'
 ROOMFILE = ROOT / 'backend' / 'lan-duel-room.json'
 LOBBY_HTML = ROOT / 'lan_lobby.html'
@@ -289,20 +290,11 @@ async def prepare_room(scenario: str, seed: int, new_room: bool, port: int) -> N
     # Previous sealed orders can still be resumed without changing the saved game.
     if _room.get('game_id'):
         await reconcile_once()
-    ip = lan_address()
     print('\n=========== 局域网双人对战 ===========', flush=True)
     print(f'当前对局：{_room.get("game_id") or "尚未创建，等待双方在大厅准备"}', flush=True)
-    invite = f'http://{ip}:{port}/lan/seat#{_room["entry_ticket"]}'
-    # This file contains a bearer credential. Keep it outside the Git repository.
-    shortcut = ROOT.parent / '铁底湾-双击加入联机大厅.url'
-    shortcut.write_text('[InternetShortcut]\nURL=' + invite + '\n', encoding='utf-8')
-    try:
-        os.chmod(shortcut, 0o600)
-    except OSError:
-        pass
-    print(f'共享双击入口（请私发给两位玩家）：{shortcut}', flush=True)
-    print('玩家双击 .url 后在大厅选择空闲阵营；原来的专属邀请链接仍兼容。', flush=True)
-    print('共享入口含加入凭据，只能私下发送；不要开放到公网。', flush=True)
+    # IBS_HOST_AUTO_OPEN_LOBBY_V1: do not create a bearer-token .url shortcut.
+    print('房间已准备；服务启动后将自动打开主机浏览器的联机大厅。', flush=True)
+    print('客机可使用 EasyTier Guest 自动发现入口。', flush=True)
     print('===================================\n', flush=True)
 
 
@@ -976,6 +968,38 @@ def main() -> None:
     async def run():
         await prepare_room(args.scenario, args.seed, args.new_room, args.port)
     asyncio.run(run())
+    # IBS_HOST_AUTO_OPEN_LOBBY_V1: launch the host lobby after TCP/HTTP is ready.
+    from http.client import HTTPConnection
+    from threading import Thread
+    import time
+    import webbrowser
+
+    def _open_host_lobby_when_ready() -> None:
+        address = lan_address()
+        local_url = f'http://{address}:{args.port}/lan/seat'
+        # Keep the bearer credential out of the log and off disk.
+        browser_url = f'{local_url}#{_room["entry_ticket"]}'
+        for _ in range(80):
+            connection = HTTPConnection(address, args.port, timeout=1.0)
+            try:
+                connection.request('GET', '/lan/seat')
+                response = connection.getresponse()
+                response.read()
+                if response.status == 200:
+                    try:
+                        if not webbrowser.open(browser_url, new=2):
+                            print('默认浏览器未自动打开，请检查 Windows 默认浏览器设置。', flush=True)
+                    except Exception as exc:
+                        print(f'无法自动打开浏览器：{exc}', flush=True)
+                    return
+            except OSError:
+                pass
+            finally:
+                connection.close()
+            time.sleep(0.25)
+        print('联机大厅暂未就绪；请检查 Host 启动日志与 8765 端口。', flush=True)
+
+    Thread(target=_open_host_lobby_when_ready, daemon=True).start()
     # This must be a single process: _room and _guard are process-local.
     uvicorn.run(app, host=args.host, port=args.port, workers=1, log_level='info')
 

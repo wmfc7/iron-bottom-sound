@@ -183,7 +183,7 @@ def test_different_save_requires_second_mutual_approval(env):
         assert imported == ['loaded-1']
 
 
-def test_host_creates_shared_url_outside_repository(env, monkeypatch, tmp_path):
+def test_host_prepares_room_without_url_shortcut(env, monkeypatch, tmp_path):
     import asyncio
     gateway, _, _ = env
     root = tmp_path / 'game'
@@ -195,13 +195,9 @@ def test_host_creates_shared_url_outside_repository(env, monkeypatch, tmp_path):
     gateway.ROOMFILE = root / 'backend' / 'lan-duel-room.json'
     monkeypatch.setattr(gateway, 'lan_address', lambda: '10.88.1.10')
     asyncio.run(gateway.prepare_room('IBS-S-03', 1, True, 8765))
-    shortcut = tmp_path / '铁底湾-双击加入联机大厅.url'
-    content = shortcut.read_text(encoding='utf8')
-    assert content.startswith('[InternetShortcut]\nURL=http://10.88.1.10:8765/lan/seat#')
-    assert gateway._room['entry_ticket'] in content
-    assert gateway._room['tickets']['axis'] not in content
-    assert gateway._room['tickets']['allies'] not in content
-    assert not (root / shortcut.name).exists()
+    assert gateway.ROOMFILE.exists()
+    assert gateway._room['entry_ticket']
+    assert not (tmp_path / '铁底湾-双击加入联机大厅.url').exists()
 
 
 def test_path_traversal_rejected(env):

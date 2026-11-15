@@ -83,14 +83,14 @@ class FormationMovementPreviewRequest(BaseModel):
     formations: list[FormationMovementOrder]
 
 
-_frontend_dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+_frontend_dist = ROOT / "frontend" / "dist"
 
 engine = IronBottomEngine()
-_default_db = Path(__file__).resolve().parents[3] / "backend" / "iron-bottom-sound.sqlite3"
+_default_db = ROOT / "backend" / "iron-bottom-sound.sqlite3"
 repository = GameRepository(os.environ.get("IBS_DB_PATH", str(_default_db)))
 for _definition in repository.custom_scenarios():
     register_custom_scenario(_definition)
-_default_reports_dir = Path(__file__).resolve().parents[3] / "backend" / "reports"
+_default_reports_dir = ROOT / "backend" / "reports"
 reports_root = os.environ.get("IBS_REPORTS_DIR", str(_default_reports_dir))
 narrative_commander_factory = lambda: OpenAICompatibleCommander(timeout=30, max_tokens=800)
 # 用户主动提供的 LLM 密钥（按 game_id）：进程内存，重启即清空，绝不写盘/写库。
