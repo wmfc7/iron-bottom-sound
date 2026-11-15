@@ -56,13 +56,27 @@ button.secondary,.buttonlink.secondary{background:#23384b}button:disabled{opacit
 <button id="ready" disabled>我已确认，准备完毕</button>
 <p class="hint" id="readyHint">对方也确认后，服务器会创建对局。不会通过客户端直接开放原版 /games 接口。</p>
 </section></div>
-<div class="card"><strong>使用说明</strong><p>双方必须在各自电脑上使用对应阵营邀请链接。主机和客机共用一个房间；旧对局可以继续，只有双方再次点击准备才会创建新局。如果不同意当前规则，可以先修改并保存，另一方会自动收到新配置。</p>
+<div class="card" id="savesCard">
+<h2>三、主机存档 / 联机读档</h2>
+<p class="hint">存档由房主服务器保管，不会向玩家浏览器下载隐藏单位、封存订单等完整数据。任一阵营可以保存当前对局；读取已有存档需要轴心国与同盟国分别确认同一个存档。</p>
+<div class="columns"><section>
+<label for="saveLabel">存档名称（最多 60 字）</label><input id="saveLabel" type="text" maxlength="60" placeholder="例如：第 4 回合开始" />
+<button id="saveGame">将当前对局存档到主机</button>
+</section><section>
+<label for="saveList">主机保存的对局</label><select id="saveList"><option value="">正在加载存档……</option></select>
+<button class="secondary" id="loadGame">确认读取此存档</button>
+<button class="secondary" id="refreshSaves">刷新存档列表</button>
+</section></div>
+<div id="loadStatus" class="notice" hidden></div>
+<p class="hint">读档会创建新对局 ID 并切换整个联机房间。原对局、原存档和双方阵营身份保留；未获得双方同意不会切换。</p>
+</div>
+<div class="card"><strong>使用说明</strong><p>两位玩家双击房主分享的同一个 .url 入口文件，然后在页面选择尚未被占用的阵营。主机和客机共用一个房间；旧对局可以继续，只有双方再次点击准备才会创建新局。如果不同意当前规则，可以先修改并保存，另一方会自动收到新配置。</p>
 <a href="/lan/control">查看回合推进状态</a></div>
 </main>
 <script>
 'use strict';
 const labels={hidden_contacts:'隐藏接触',radar:'雷达',star_shells:'照明弹',searchlights:'探照灯',malfunction_66:'武器故障 66',squalls:'风暴',smoke:'烟幕',silhouettes:'舰影辨识',hidden_damage:'隐藏损伤',blind_torpedoes:'盲射鱼雷'};
-const $=id=>document.getElementById(id);let state=null,dirty=false,scenarios=[],firstGameSet=false,originalGame=null,polling=false;
+const $=id=>document.getElementById(id);let state=null,dirty=false,scenarios=[],firstGameSet=false,originalGame=null,polling=false,saves=[];
 function warning(message){$('error').hidden=!message;$('error').textContent=message||''}
 function markDirty(){dirty=true;$('dirty').hidden=false;$('ready').disabled=true}
 for(const [id,label] of Object.entries(labels)){
@@ -113,6 +127,14 @@ function paint(s){
  if(s.game_url)$('resume').href=s.game_url;
  $('ready').textContent=s.ready[s.side]?'取消准备':'我已确认，准备完毕';
  $('ready').disabled=dirty;
+ $('saveGame').disabled=!s.game_id;
+ const pending=s.load_pending;
+ $('loadStatus').hidden=!pending;
+ if(pending){
+   const saved=saves.find(row=>row.id===pending.id);
+   $('loadStatus').textContent='正在请求双方读取存档：'+(saved?saved.label:pending.id)+'；轴心国：'+(pending.acks.axis?'已同意':'待确认')+'；同盟国：'+(pending.acks.allies?'已同意':'待确认');
+   if(pending.id && !$('saveList').value)$('saveList').value=pending.id;
+ }
  if(!dirty && (!prev || prev.revision!==s.revision))fill(s.config);
  if(dirty && prev && prev.revision!==s.revision){warning('对方已经修改配置；请点击“读取最新”，核对之后再保存。')}else if(!dirty){warning(s.error||'')}
  if(s.game_id && originalGame!==s.game_id){location.replace(s.game_url)}
@@ -126,10 +148,31 @@ $('reload').onclick=()=>{dirty=false;refresh().then(()=>{if(state){fill(state.co
 $('ready').onclick=async()=>{if(!state)return;try{
  $('ready').disabled=true;const next=await api('/lan/lobby/ready','POST',{revision:state.revision,ready:!state.ready[state.side]});paint(next);
  }catch(e){warning(String(e));await refresh()}finally{$('ready').disabled=dirty}}
+async function refreshSaves(){
+ try{const selected=$('saveList').value;saves=await api('/lan/lobby/saves');
+  $('saveList').replaceChildren();
+  const empty=document.createElement('option');empty.value='';empty.textContent=saves.length?'请选择存档':'主机尚无存档';$('saveList').append(empty);
+  for(const row of saves){const opt=document.createElement('option');opt.value=row.id;
+   opt.textContent=(row.label||'未命名')+' · '+row.scenario_id+' · 第'+row.turn+'回合 / '+row.phase+' · '+row.saved_at;$('saveList').append(opt)}
+  if(saves.some(row=>row.id===selected))$('saveList').value=selected;
+  else if(state?.load_pending && saves.some(row=>row.id===state.load_pending.id))$('saveList').value=state.load_pending.id;
+ }catch(e){warning('存档列表加载失败：'+String(e))}
+}
+$('refreshSaves').onclick=refreshSaves;
+$('saveGame').onclick=async()=>{try{
+ $('saveGame').disabled=true;const row=await api('/lan/lobby/save','POST',{label:$('saveLabel').value});
+ await refreshSaves();$('saveList').value=row.id;$('saveLabel').value='';alert('已保存到房主电脑：'+row.label);
+ }catch(e){warning(String(e))}finally{$('saveGame').disabled=!state?.game_id}};
+$('loadGame').onclick=async()=>{
+ if(!state)return;const save_id=$('saveList').value;if(!save_id){warning('请先选择一个存档');return}
+ if(!confirm('申请读取此存档？只有双方都确认相同存档时才会切换对局。'))return;
+ try{$('loadGame').disabled=true;paint(await api('/lan/lobby/load','POST',{revision:state.revision,save_id}))}
+ catch(e){warning(String(e));await refresh()}finally{$('loadGame').disabled=false}
+};
 async function boot(){try{
  scenarios=await api('/lan/lobby/scenarios');const sel=$('scenario');sel.replaceChildren();
  for(const row of scenarios){const opt=document.createElement('option');opt.value=row.id;opt.textContent=row.title+' · '+row.id+(row.custom?'（工坊）':'');sel.append(opt)}
- if(!scenarios.length)throw Error('原版服务器未提供可选剧本');await refresh();setInterval(refresh,2200);
+ if(!scenarios.length)throw Error('原版服务器未提供可选剧本');await refresh();await refreshSaves();setInterval(refresh,2200);setInterval(refreshSaves,10000);
  }catch(e){warning('大厅初始化失败：'+String(e))}}
 boot();
 </script>

@@ -326,7 +326,8 @@ class TacticalCommander(DeterministicCommander):
             batch.contacts = self._contact_setup(engine, game_id, side)
             intents = {order.marker_id: "部署隐蔽编队" for order in batch.contacts}
         elif state.phase == Phase.REINFORCEMENT:
-            batch.reinforcements = self._reinforcements(engine, game_id, side)
+            from .reinforcement_orders import propose
+            batch.reinforcements, batch.reinforcement_entry_choice = propose(engine, state, side)
             intents = {order.ship_id: "按想定边界进入" for order in batch.reinforcements}
         elif state.phase == Phase.MOVEMENT_PLANNING:
             batch.movement, batch.contact_movement, intents = self._plan_movement(engine, state, side, self._ai_rng(state, side))

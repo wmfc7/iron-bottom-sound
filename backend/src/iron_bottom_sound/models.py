@@ -140,6 +140,8 @@ class OptionalRules(BaseModel):
     silhouettes: bool = False
     hidden_damage: bool = False
     blind_torpedoes: bool = False
+    # S-13 R3: optional three IJN APDs; cannot be silently deployed by default.
+    s13_axis_apd_reinforcements: bool = False
 
 
 class ResearchConsent(BaseModel):
@@ -529,6 +531,8 @@ class OrderBatch(BaseModel):
     side: Side
     phase: Phase | None = None
     reinforcements: list[ReinforcementOrder] = Field(default_factory=list)
+    # S-13 R2: sealed Allied entry choice on turn 1 (never a public option).
+    reinforcement_entry_choice: HexCoord | None = None
     contacts: list[ContactSetupOrder] = Field(default_factory=list)
     contact_movement: list[ContactMovementOrder] = Field(default_factory=list)
     movement: list[MovementOrder] = Field(default_factory=list)

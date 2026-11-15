@@ -144,33 +144,8 @@ class DeterministicCommander(LLMCommander):
     def _reinforcements(
         engine: IronBottomEngine, game_id: str, side: Side
     ) -> list[ReinforcementOrder]:
-        state = engine.get(game_id)
-        ships = [
-            ship for ship in state.ships.values()
-            if ship.side == side and ship.position is None
-            and ship.reinforcement_turn == state.turn and state.reinforcement_available
-        ]
-        if not ships:
-            return []
-        occupied = {ship.position.label for ship in state.ships.values() if ship.position and not ship.sunk}
-        entries = [
-            HexCoord(q=q, r=row - (q - (q & 1)) // 2)
-            for q in range(state.map_columns) for row in range(state.map_rows)
-        ]
-        entries = [
-            entry for entry in entries
-            if engine._reinforcement_entry_legal(state, entry)
-            and entry.label not in occupied and not engine._terrain_impassable(state, entry)
-        ]
-        return [
-            ReinforcementOrder(
-                ship_id=ship.id,
-                entry_hex=entries[index],
-                heading=1,
-                speed=0,
-            )
-            for index, ship in enumerate(ships)
-        ]
+        from .reinforcement_orders import propose
+        return propose(engine, engine.get(game_id), side)[0]
 
     @staticmethod
     def _stationary_plan(engine: IronBottomEngine, game_id: str, ship_id: str) -> str:
@@ -203,7 +178,8 @@ class DeterministicCommander(LLMCommander):
             batch.contacts = self._contact_setup(engine, game_id, side)
             intents = {order.marker_id: "部署隐蔽编队" for order in batch.contacts}
         elif state.phase == Phase.REINFORCEMENT:
-            batch.reinforcements = self._reinforcements(engine, game_id, side)
+            from .reinforcement_orders import propose
+            batch.reinforcements, batch.reinforcement_entry_choice = propose(engine, state, side)
             intents = {order.ship_id: "按想定边界进入" for order in batch.reinforcements}
         elif state.phase == Phase.MOVEMENT_PLANNING:
             own = [ship for ship in observation.ships if ship.side == side and not ship.sunk and ship.position]
@@ -531,6 +507,10 @@ class OpenAICompatibleCommander(LLMCommander):
             "order_batch_json_schema": OrderBatch.model_json_schema(),
             "plan_sheet_json_schema": AIPlanSheet.model_json_schema(),
             "few_shot_example_output": _few_shot_for(state, side),
+            "reinforcement_candidates": engine._reinforcement_candidates(state, side) if state.phase == Phase.REINFORCEMENT else None,
+            "reinforcement_instruction": ("S13 turn 1: seal reinforcement_entry_choice; on arrival order the complete group in legal cells. "
+                                          "S10: respect each group's distinct entry corridor; eastern force is a contiguous column. "
+                                          "Do not place ships if the group is not available.") if state.phase == Phase.REINFORCEMENT else None,
         }
         from .ai_memory import prompt_memory, memory, sanitize
         prompt["same_game_memory"] = prompt_memory(state, side)

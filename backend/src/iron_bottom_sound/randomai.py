@@ -151,39 +151,9 @@ class RandomCommander(DeterministicCommander):
     def _random_reinforcements(
         self, engine: IronBottomEngine, game_id: str, side: Side, rng: random.Random,
     ) -> list[ReinforcementOrder]:
-        """随机合法增援入场：每艘待入场舰随机取一个合法入口格（互不相同），
-        航向 1..6、速度 0..当前最大航速 均匀随机。"""
-        state = engine.get(game_id)
-        ships = [
-            ship for ship in state.ships.values()
-            if ship.side == side and ship.position is None
-            and ship.reinforcement_turn == state.turn and state.reinforcement_available
-        ]
-        if not ships:
-            return []
-        occupied = {ship.position.label for ship in state.ships.values() if ship.position and not ship.sunk}
-        entries = [
-            HexCoord(q=q, r=row - (q - (q & 1)) // 2)
-            for q in range(state.map_columns) for row in range(state.map_rows)
-        ]
-        entries = [
-            entry for entry in entries
-            if engine._reinforcement_entry_legal(state, entry)
-            and entry.label not in occupied and not engine._terrain_impassable(state, entry)
-        ]
-        rng.shuffle(entries)
-        orders: list[ReinforcementOrder] = []
-        for ship in ships:
-            if not entries:
-                break
-            entry = entries.pop()
-            orders.append(ReinforcementOrder(
-                ship_id=ship.id,
-                entry_hex=entry,
-                heading=rng.randint(1, 6),
-                speed=rng.randint(0, ship.max_speed_for_turn(state.turn)),
-            ))
-        return orders
+        """随机候选选择由规则候选接口约束，保持编队合法。"""
+        from .reinforcement_orders import propose
+        return propose(engine, engine.get(game_id), side, rng)[0]
 
     def _random_movement(
         self, engine: IronBottomEngine, game_id: str, side: Side, rng: random.Random,
@@ -280,7 +250,8 @@ class RandomCommander(DeterministicCommander):
             batch.contacts = self._random_contacts(engine, game_id, side, rng)
             intents = {order.marker_id: "乱打：随机隐蔽入口" for order in batch.contacts}
         elif state.phase == Phase.REINFORCEMENT:
-            batch.reinforcements = self._random_reinforcements(engine, game_id, side, rng)
+            from .reinforcement_orders import propose
+            batch.reinforcements, batch.reinforcement_entry_choice = propose(engine, state, side, rng)
             intents = {order.ship_id: "乱打：随机入场口" for order in batch.reinforcements}
         elif state.phase == Phase.MOVEMENT_PLANNING:
             batch.movement, batch.contact_movement, intents = self._random_movement(engine, game_id, side, rng)

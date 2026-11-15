@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from lan_unseal import PendingSubmissionStore, UnsealError  # IBS_LAN_UNSEAL_V1
 from urllib.parse import quote
+from lan_lobby_storage import LobbySaveStore
 
 import httpx
 import uvicorn
@@ -33,8 +35,11 @@ ROOT = Path(__file__).resolve().parent
 FRONTEND = ROOT / 'frontend' / 'dist'
 ROOMFILE = ROOT / 'backend' / 'lan-duel-room.json'
 LOBBY_HTML = ROOT / 'lan_lobby.html'
-OPTIONAL_RULES = ('hidden_contacts', 'radar', 'star_shells', 'searchlights', 'malfunction_66', 'squalls', 'smoke', 'silhouettes', 'hidden_damage', 'blind_torpedoes')
+OPTIONAL_RULES = ('hidden_contacts', 'radar', 'star_shells', 'searchlights', 'malfunction_66', 'squalls', 'smoke', 'silhouettes', 'hidden_damage', 'blind_torpedoes', 's13_axis_apd_reinforcements')
 COOKIE = 'ibs_lan_ticket'
+ENTRY_COOKIE = 'ibs_lan_entry'
+IDENTITY_COOKIE = 'ibs_lan_identity'
+_lobby_saves = LobbySaveStore(ROOT / 'backend' / 'lan-saves')
 ORDER_PHASES = {
     'formation_setup', 'contact_setup', 'reinforcement',
     'movement_planning', 'torpedo_planning', 'gunnery',
@@ -78,14 +83,40 @@ def token_digest(token: str) -> str:
 
 def get_player(request: Request) -> str:
     ticket = request.cookies.get(COOKIE, '')
-    # Both sides have 256-bit independent capability tokens.
     if not ticket or not _room:
-        raise HTTPException(401, '尚未加入对局：请使用自己的阵营邀请链接')
+        raise HTTPException(401, '尚未认领阵营：请打开主机分享的联机大厅入口')
     candidate = token_digest(ticket)
     for side in ('axis', 'allies'):
         if secrets.compare_digest(candidate, _room['hashes'][side]):
+            owner = _room.get('seat_claims', {}).get(side)
+            if owner and not secrets.compare_digest(
+                    owner, token_digest(request.cookies.get(IDENTITY_COOKIE, ''))):
+                raise HTTPException(401, '该阵营已由另一个浏览器认领')
             return side
     raise HTTPException(401, '邀请令牌无效或房间已更换')
+
+
+def entry_authenticated(request: Request) -> bool:
+    ticket = request.cookies.get(ENTRY_COOKIE, '')
+    return bool(ticket and _room.get('entry_hash') and
+                secrets.compare_digest(token_digest(ticket), _room['entry_hash']))
+
+
+def seat_for_identity(identity: str) -> str | None:
+    if not identity:
+        return None
+    digest = token_digest(identity)
+    for side, owner in _room.get('seat_claims', {}).items():
+        if secrets.compare_digest(digest, owner):
+            return side
+    return None
+
+
+def set_game_cookie(response: Response, side: str) -> Response:
+    response.set_cookie(COOKIE, _room['tickets'][side], httponly=True, samesite='lax',
+                        secure=False, path='/', max_age=60 * 60 * 24 * 30)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 def origin_ok(request: Request) -> bool:
@@ -245,8 +276,13 @@ async def prepare_room(scenario: str, seed: int, new_room: bool, port: int) -> N
         tickets = {'axis': secrets.token_urlsafe(32), 'allies': secrets.token_urlsafe(32)}
         _room = {'game_id': None, 'scenario': scenario, 'tickets': tickets,
                  'hashes': {side: token_digest(ticket) for side, ticket in tickets.items()},
-                 'previous_game_ids': []}
+                 'previous_game_ids': [], 'seat_claims': {},
+                 'entry_ticket': secrets.token_urlsafe(32)}
         print('已创建联机准备大厅；双方确认后才创建对局。', flush=True)
+    if 'entry_ticket' not in _room:
+        _room['entry_ticket'] = secrets.token_urlsafe(32)
+    _room['entry_hash'] = token_digest(_room['entry_ticket'])
+    _room.setdefault('seat_claims', {})
     if 'lobby' not in _room:
         _room['lobby'] = fresh_lobby(_room.get('scenario') or scenario, seed)
     save_room()
@@ -256,10 +292,17 @@ async def prepare_room(scenario: str, seed: int, new_room: bool, port: int) -> N
     ip = lan_address()
     print('\n=========== 局域网双人对战 ===========', flush=True)
     print(f'当前对局：{_room.get("game_id") or "尚未创建，等待双方在大厅准备"}', flush=True)
-    print(f'轴心国（只发给玩家 A）：http://{ip}:{port}/join#{_room["tickets"]["axis"]}', flush=True)
-    print(f'同盟国（只发给玩家 B）：http://{ip}:{port}/join#{_room["tickets"]["allies"]}', flush=True)
-    print('双方通过邀请链接进入 /lan/lobby，确认规则后开始新局。', flush=True)
-    print('请勿向对手分享自己阵营的邀请链接。不要开放到公网。', flush=True)
+    invite = f'http://{ip}:{port}/lan/seat#{_room["entry_ticket"]}'
+    # This file contains a bearer credential. Keep it outside the Git repository.
+    shortcut = ROOT.parent / '铁底湾-双击加入联机大厅.url'
+    shortcut.write_text('[InternetShortcut]\nURL=' + invite + '\n', encoding='utf-8')
+    try:
+        os.chmod(shortcut, 0o600)
+    except OSError:
+        pass
+    print(f'共享双击入口（请私发给两位玩家）：{shortcut}', flush=True)
+    print('玩家双击 .url 后在大厅选择空闲阵营；原来的专属邀请链接仍兼容。', flush=True)
+    print('共享入口含加入凭据，只能私下发送；不要开放到公网。', flush=True)
     print('===================================\n', flush=True)
 
 
@@ -268,7 +311,7 @@ def fresh_lobby(scenario_id: str, seed: int = 1) -> dict:
             'optional_rules': {name: False for name in OPTIONAL_RULES},
             'squall_hexes': [], 'radar_1942_variant': False,
             'realistic_command': False, 'battle_report': False},
-            'ready': {'axis': False, 'allies': False}, 'error': ''}
+            'ready': {'axis': False, 'allies': False}, 'error': '', 'load_pending': None}
 
 
 def save_room() -> None:
@@ -291,7 +334,8 @@ def public_lobby(side: str) -> dict:
     lobby = _room['lobby']
     return {'side': side, 'revision': lobby['revision'],
             'config': lobby['config'], 'ready': lobby['ready'],
-            'error': lobby.get('error', ''), 'game_id': _room.get('game_id'),
+            'error': lobby.get('error', ''), 'load_pending': lobby.get('load_pending'),
+            'game_id': _room.get('game_id'),
             'game_url': current_game_url(side)}
 
 
@@ -330,8 +374,14 @@ def normalize_configuration(payload: object) -> dict:
     if type(seed) is not int or not (0 <= seed <= 2147483647):
         raise HTTPException(422, '随机种子必须是 0 至 2147483647 的整数')
     rules = payload['optional_rules']
-    if not isinstance(rules, dict) or set(rules) != set(OPTIONAL_RULES) or any(type(v) is not bool for v in rules.values()):
+    if not isinstance(rules, dict) or any(k not in OPTIONAL_RULES or type(v) is not bool for k,v in rules.items()):
         raise HTTPException(422, '可选规则字段不合法')
+    # Existing LAN room snapshots predate this S13-only toggle.
+    if set(rules) not in (set(OPTIONAL_RULES), set(OPTIONAL_RULES)-{'s13_axis_apd_reinforcements'}):
+        raise HTTPException(422, '可选规则字段不完整')
+    rules = {**rules, 's13_axis_apd_reinforcements': rules.get('s13_axis_apd_reinforcements', False)}
+    if sid != 'IBS-S-13' and rules['s13_axis_apd_reinforcements']:
+        raise HTTPException(422, '日军APD可选增援仅适用于想定13')
     squalls = payload['squall_hexes']
     if not isinstance(squalls, list) or len(squalls) > 32 or any(
         not isinstance(v, str) or not re.fullmatch(r'[A-Za-z]{1,3}[0-9]{1,3}', v) for v in squalls
@@ -342,7 +392,133 @@ def normalize_configuration(payload: object) -> dict:
     for key in ('radar_1942_variant', 'realistic_command', 'battle_report'):
         if type(payload[key]) is not bool:
             raise HTTPException(422, f'{key} 必须是布尔值')
-    return dict(payload)
+    return {**payload, 'optional_rules': rules}
+
+
+SEAT_HTML = (ROOT / 'lan_seat.html').read_text(encoding='utf-8')
+
+
+@app.get('/lan/seat', response_class=HTMLResponse)
+async def seat_page(request: Request):
+    try:
+        side = get_player(request)
+        # An old side-specific invitation may have left a valid side cookie.
+        # Do not skip the new seat picker until this browser actually owns a seat.
+        if _room.get('seat_claims', {}).get(side) and seat_for_identity(
+                request.cookies.get(IDENTITY_COOKIE, '')) == side:
+            return RedirectResponse('/lan/lobby', status_code=303)
+    except HTTPException:
+        pass
+    return HTMLResponse(SEAT_HTML, headers={
+        'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"})
+
+
+@app.post('/lan/entry')
+async def enter_lobby(request: Request):
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站加入请求被拒绝')
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, '无效邀请码')
+    ticket = payload.get('ticket') if isinstance(payload, dict) else None
+    if not isinstance(ticket, str) or len(ticket) > 128 or not _room.get('entry_hash') or not secrets.compare_digest(
+            token_digest(ticket), _room['entry_hash']):
+        raise HTTPException(401, '联机入口已过期或无效，请房主重新分享')
+    return _grant_entry_cookies(request, ticket)
+
+
+
+# IBS_EASYTIER_AUTOFIND_V3. No bearer token appears in discovery output.
+# The host launcher must bind to a real EasyTier IPv4 and set these opt-in variables.
+def _autofind_peer_allowed(request: Request) -> bool:
+    if os.environ.get('IBS_LAN_AUTOFIND', '') != '1':
+        return False
+    address = os.environ.get('IBS_LAN_ADVERTISE_IP', '').strip()
+    cidr = os.environ.get('IBS_LAN_AUTOFIND_CIDR', '').strip()
+    if not address or not cidr:
+        return False
+    try:
+        own = ipaddress.IPv4Address(address)
+        net = ipaddress.IPv4Network(cidr, strict=False)
+        peer = ipaddress.IPv4Address(request.client.host if request.client else '')
+    except (ValueError, TypeError):
+        return False
+    return own in net and peer in net
+
+
+@app.get('/lan/discovery')
+async def find_lan_host(request: Request):
+    if not _autofind_peer_allowed(request) or not _room:
+        raise HTTPException(404, '未开放自动发现')
+    return JSONResponse({
+        'service': 'iron-bottom-sound-easytier', 'protocol': 1,
+        'title': '铁底湾的回响 IV', 'open_seats': [
+            side for side in ('axis', 'allies') if not _room.get('seat_claims', {}).get(side)
+        ],
+    }, headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+
+
+@app.post('/lan/auto-entry')
+async def enter_without_invite(request: Request):
+    if not _autofind_peer_allowed(request):
+        raise HTTPException(404, '未开放自动入场')
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站加入请求被拒绝')
+    if not _room.get('entry_ticket') or not _room.get('entry_hash'):
+        raise HTTPException(503, '大厅尚未准备完成')
+    # Reuse the same cookie and seat-claim flow as the existing shared invitation.
+    return _grant_entry_cookies(request, _room['entry_ticket'])
+
+
+def _grant_entry_cookies(request: Request, ticket: str) -> JSONResponse:
+    identity = request.cookies.get(IDENTITY_COOKIE, '')
+    if not identity or len(identity) > 128:
+        identity = secrets.token_urlsafe(32)
+    response = JSONResponse({'ok': True})
+    response.set_cookie(ENTRY_COOKIE, ticket, httponly=True, samesite='lax',
+                        secure=False, path='/', max_age=60 * 60 * 24 * 30)
+    response.set_cookie(IDENTITY_COOKIE, identity, httponly=True, samesite='lax',
+                        secure=False, path='/', max_age=60 * 60 * 24 * 30)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.get('/lan/seat/state')
+async def seat_state(request: Request):
+    if not entry_authenticated(request):
+        raise HTTPException(401, '先通过共享入口文件加入房间')
+    identity = request.cookies.get(IDENTITY_COOKIE, '')
+    return JSONResponse({'occupied': {side: bool(_room.get('seat_claims', {}).get(side))
+                                      for side in ('axis', 'allies')},
+                         'mine': seat_for_identity(identity)}, headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/lan/seat/claim')
+async def seat_claim(request: Request):
+    if not origin_ok(request) or not entry_authenticated(request):
+        raise HTTPException(403, '请使用共享入口文件加入房间')
+    identity = request.cookies.get(IDENTITY_COOKIE, '')
+    if not identity or len(identity) > 128:
+        raise HTTPException(401, '缺少浏览器身份，请重新打开共享入口文件')
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, '无效的阵营请求')
+    side = payload.get('side') if isinstance(payload, dict) else None
+    if side not in ('axis', 'allies'):
+        raise HTTPException(422, '必须选择轴心国或同盟国')
+    async with _guard:
+        mine = seat_for_identity(identity)
+        if mine and mine != side:
+            raise HTTPException(409, '这个浏览器已经认领另一阵营，不能同时占两个座位')
+        owner = _room.setdefault('seat_claims', {}).get(side)
+        if owner and not secrets.compare_digest(owner, token_digest(identity)):
+            raise HTTPException(409, '该阵营已被另一名玩家认领')
+        _room['seat_claims'][side] = token_digest(identity)
+        save_room()
+    return set_game_cookie(JSONResponse({'side': side, 'redirect': '/lan/lobby'}), side)
 
 
 @app.get('/lan/lobby', response_class=HTMLResponse)
@@ -376,6 +552,97 @@ async def lobby_briefing(scenario_id: str, request: Request):
     return response_from_upstream(result)
 
 
+@app.get('/lan/lobby/saves')
+async def lobby_saves(request: Request):
+    get_player(request)
+    async with _guard:
+        return JSONResponse(_lobby_saves.list(), headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/lan/lobby/save')
+async def lobby_save(request: Request):
+    get_player(request)
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站存档请求被拒绝')
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, '无效的存档名称')
+    label = payload.get('label', '') if isinstance(payload, dict) else None
+    if not isinstance(label, str) or len(label.strip()) > 60:
+        raise HTTPException(422, '存档名称不能超过60字')
+    async with _guard:
+        game_id = _room.get('game_id')
+        if not game_id:
+            raise HTTPException(409, '尚未开始对局，无法存档')
+        res = await call_engine('GET', f'/games/{game_id}/save')
+        if res.status_code != 200:
+            raise HTTPException(409, '原版游戏存档失败，请检查主机终端')
+        try:
+            saved = _lobby_saves.create(res.json(), label)
+        except (TypeError, ValueError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return JSONResponse(saved, headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/lan/lobby/load')
+async def lobby_load(request: Request):
+    """Two independent player approvals; atomic switch only after a valid import."""
+    global _last_error
+    side = get_player(request)
+    if not origin_ok(request):
+        raise HTTPException(403, '跨站读档请求被拒绝')
+    try:
+        data = await request.json()
+    except ValueError:
+        raise HTTPException(400, '无效的读档请求')
+    if not isinstance(data, dict) or type(data.get('revision')) is not int or not isinstance(data.get('save_id'), str):
+        raise HTTPException(422, '需要存档 ID 和大厅版本号')
+    async with _guard:
+        lobby = _room['lobby']
+        if data['revision'] != lobby['revision']:
+            raise HTTPException(409, '大厅状态已变化，请刷新后再确认读档')
+        try:
+            bundle = _lobby_saves.read(data['save_id'])
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise HTTPException(404, '指定存档不存在或损坏') from exc
+        # Validate using original authoritative import implementation; never
+        # accept untrusted bundles from a web browser.
+        state = bundle.get('state')
+        if not isinstance(state, dict) or not isinstance(state.get('options'), dict) or state['options'].get('mode') != 'hotseat':
+            raise HTTPException(422, '该存档不是双人对战存档')
+        pending = lobby.get('load_pending')
+        if not pending or pending['id'] != data['save_id']:
+            pending = {'id': data['save_id'], 'acks': {'axis': False, 'allies': False}}
+            lobby['load_pending'] = pending
+        pending['acks'][side] = True
+        if not all(pending['acks'].values()):
+            save_room()
+            return JSONResponse(public_lobby(side), headers={'Cache-Control': 'no-store'})
+        imported = await call_engine('POST', '/games/import', data=json.dumps(bundle, ensure_ascii=False).encode('utf-8'))
+        if imported.status_code not in (200, 201):
+            pending['acks'] = {'axis': False, 'allies': False}
+            save_room()
+            print('[LAN SAVE] 原版读档失败 HTTP', imported.status_code, imported.text[:700], flush=True)
+            raise HTTPException(409, '原版引擎拒绝存档，请查看主机终端日志')
+        new_game_id = imported.json().get('game_id')
+        if not isinstance(new_game_id, str) or not new_game_id:
+            raise HTTPException(502, '原版读档没有返回对局 ID')
+        previous = _room.get('game_id')
+        if previous:
+            _room.setdefault('previous_game_ids', []).append(previous)
+        _room['game_id'] = new_game_id
+        _room['scenario'] = str(bundle['state']['scenario_id'])
+        _room.pop('gunnery_checkpoint', None)
+        _last_error = ''
+        lobby['load_pending'] = None
+        lobby['ready'] = {'axis': False, 'allies': False}
+        lobby['revision'] += 1
+        lobby['error'] = ''
+        save_room()
+        return JSONResponse(public_lobby(side), headers={'Cache-Control': 'no-store'})
+
+
 @app.post('/lan/lobby/config')
 async def lobby_config(request: Request):
     side = get_player(request)
@@ -397,6 +664,7 @@ async def lobby_config(request: Request):
             lobby['ready'] = {'axis': False, 'allies': False}
             lobby['revision'] += 1
             lobby['error'] = ''
+            lobby['load_pending'] = None
             save_room()
         return JSONResponse(public_lobby(side))
 
@@ -448,6 +716,7 @@ async def lobby_ready(request: Request):
             lobby['revision'] += 1
             lobby['ready'] = {'axis': False, 'allies': False}
             lobby['error'] = ''
+            lobby['load_pending'] = None
             save_room()
             print(f'[LAN LOBBY] 双方同意：创建 {config["scenario_id"]} 对局 {game_id}', flush=True)
         else:

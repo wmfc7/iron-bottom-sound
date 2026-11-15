@@ -73,8 +73,9 @@ ships:
   - {id: IBS-U-USN-WASHINGTON, name: 华盛顿, side: allies, template: ca-american-1942, position: GG24, heading: 5, speed: 4, asset: 美国-BB-华盛顿.png, flagship: true}
   - {id: IBS-U-USN-SOUTH-DAKOTA, name: 南达科塔, side: allies, template: ca-american-1942, position: HH24, heading: 5, speed: 4, asset: 美国-BB-南达科塔.png}
 reinforcements:
-  trigger: {turn: 3, roll: 1d6, succeeds_on: [1, 2, 3, 4, 5, 6]}  # 页面写明必达；以 1d6∈[1..6] 表达确定性到达
-  arrival: {turn: 3, entry_hex_range: [G1, L1], speed: any_legal}  # 页面无掷骰，第三回合必达；无入场时机说明
+  rule_id: IBS-S-06-R2
+  trigger: {turn: 3, roll: none, succeeds_on: []}  # 页面规定必达，无骰子
+  arrival: {turn: 3, entry_hex_range: [G1, L1], speed: any_legal, formation: ordered_line_ahead}  # 页面无掷骰，第三回合必达；无入场时机说明
   ships:
     - {id: IBS-U-IJN-ATAGO, name: 爱宕, side: axis, template: ca-japanese-1942, speed_track: [6, 6, 5], asset: 日本-CA-爱宕.png, flagship: true}
     - {id: IBS-U-IJN-TAKAO, name: 高雄, side: axis, template: ca-japanese-1942, speed_track: [6, 6, 5], asset: 日本-CA-高雄.png}

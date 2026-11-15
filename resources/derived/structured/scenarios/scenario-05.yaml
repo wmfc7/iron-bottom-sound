@@ -68,8 +68,9 @@ ships:
   - {id: IBS-U-USN-CONVERSE, name: 康弗斯, side: allies, template: dd-american-1942, position: K20, heading: 4, speed: 4, asset: 美国-DD-康弗斯.png}
   - {id: IBS-U-USN-SPENCE, name: 斯彭斯, side: allies, template: dd-american-1942, position: K19, heading: 4, speed: 4, asset: 美国-DD-斯彭斯.png}
 reinforcements:
-  trigger: {turn: 2, roll: 1d6, succeeds_on: [1, 2, 3, 4, 5, 6]}  # 页面写明必达；以 1d6∈[1..6] 表达确定性到达
-  arrival: {turn: 2, entry_hex_range: [HH9, HH16], speed: any_legal}  # 页面无掷骰，第二回合必达；无入场时机说明
+  rule_id: IBS-S-05-R4
+  trigger: {turn: 2, roll: none, succeeds_on: []}  # 页面规定必达，无骰子
+  arrival: {turn: 2, entry_hex_range: [HH9, HH16], speed: any_legal, formation: ordered_line_ahead}  # 页面无掷骰，第二回合必达；无入场时机说明
   ships:
     - {id: IBS-U-IJN-AMAGIRI, name: 天雾, side: axis, template: dd-japanese-1942, speed_track: [6, 6, 5], asset: 日本-DD-天雾.png}
     - {id: IBS-U-IJN-YUGIRI, name: 夕雾, side: axis, template: dd-japanese-1942, speed_track: [6, 6, 5], asset: 日本-DD-夕雾.png}

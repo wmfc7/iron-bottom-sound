@@ -98,6 +98,7 @@ ships:
   - {id: IBS-U-USN-MAURY, name: 莫里, side: allies, template: dd-american-1942, position: FF11, heading: 4, speed: 4, asset: 美国-DD-莫里.png}
   - {id: IBS-U-USN-WOODWORTH, name: 伍德沃斯, side: allies, template: dd-american-1942, position: GG11, heading: 4, speed: 4, asset: 美国-DD-伍德沃斯.png}
 reinforcements:
+  rule_id: IBS-S-08-R3
   trigger: {turn: 4, roll: 1d6, succeeds_on: [1]}
   arrival: {turn: 4, timing: before_movement_planning, entry_hex_range: [E17, U27], speed: any_legal}
   ships:

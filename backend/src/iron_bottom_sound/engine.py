@@ -1001,7 +1001,7 @@ class IronBottomEngine:
         `_reinforcement_entry_legal`（E17-U27 最短六角边走廊）枚举。检定结果取最后一条
         `reinforcement_roll` 事件。前端据此展示"检定失败/未到回合"或逐舰入场表。
         """
-        from . import savo
+        from . import savo, vela
         if savo.enabled(state):
             rows = savo.candidates(self, state, side)
             return {"group_available": bool(rows), "ships": rows, "entry_hexes": sorted({h for row in rows for h in row["entry_hexes"]}),
@@ -1012,20 +1012,33 @@ class IronBottomEngine:
         ]
         entry_hexes: list[str] = []
         if state.reinforcement_entry_start is not None and state.reinforcement_entry_end is not None:
-            for q in range(1, 34):
-                for r in range(1, 28):
-                    candidate = HexCoord(q=q, r=r)
-                    if self._reinforcement_entry_legal(state, candidate):
+            # Match order validation: never offer an occupied/impassable entry.
+            # The legacy UI and all AI commanders share this candidate list.
+            occupied = {ship.position.label for ship in state.ships.values()
+                        if ship.position is not None and not ship.sunk}
+            for q in range(state.map_columns):
+                for printed_row in range(state.map_rows):
+                    candidate = HexCoord(q=q, r=printed_row - q // 2)
+                    if (self._reinforcement_entry_legal(state, candidate)
+                            and candidate.label not in occupied
+                            and not self._terrain_impassable(state, candidate)):
                         entry_hexes.append(candidate.label)
         roll_result = None
         for event in reversed(state.events):
-            if event.type == "reinforcement_roll":
+            if event.type == "reinforcement_roll" and event.turn in (state.turn, state.reinforcement_trigger_turn):
                 roll_result = {
                     "roll": event.payload["roll"],
                     "available": event.payload["available"],
                 }
                 break
-        return {
+        from .data import load_scenario
+        scenario = state.rule_snapshot.get("scenario") or load_scenario(state.scenario_id)
+        reinforcement_cfg = scenario.get("reinforcements") or {}
+        declared_order = {row["id"]: i for i, row in enumerate(reinforcement_cfg.get("ships", []))}
+        arrival_cfg = reinforcement_cfg.get("arrival") or {}
+        candidate_data = {
+            "required_column": arrival_cfg.get("formation") == "ordered_line_ahead",
+            "required_speed": arrival_cfg.get("speed") if isinstance(arrival_cfg.get("speed"), int) else None,
             "group_available": bool(state.reinforcement_available),
             "arrival_turn": state.reinforcement_arrival_turn,
             "trigger_turn": state.reinforcement_trigger_turn,
@@ -1042,9 +1055,10 @@ class IronBottomEngine:
                     "asset": ship.asset,
                     "max_speed": ship.max_speed_for_turn(state.turn),
                 }
-                for ship in sorted(pending, key=lambda item: item.id)
+                for ship in sorted(pending, key=lambda item: declared_order.get(item.id, 100000))
             ],
         }
+        return vela.candidates(self, state, side, candidate_data) if vela.enabled(state) else candidate_data
 
     def movement_plan_trajectories(
         self, state: GameState, side: Side, plans: list[dict[str, Any]],
@@ -1802,8 +1816,12 @@ class IronBottomEngine:
             if submitted != expected:
                 errors.append(f"Movement plans must cover every active ship; missing={sorted(expected-submitted)}, extra={sorted(submitted-expected)}")
             self._validate_contact_movement(state, batch, errors)
-        from . import savo
+        from . import savo, vela
         savo_reinforcement = savo.enabled(state) and state.phase == Phase.REINFORCEMENT
+        if vela.enabled(state):
+            errors.extend(vela.validate(self, state, batch))
+        elif batch.reinforcement_entry_choice is not None:
+            errors.append("Secret reinforcement entry choice is only available in scenario 13")
         if savo_reinforcement:
             errors.extend(savo.validate(self, state, batch))
         for order in batch.reinforcements if state.phase == Phase.REINFORCEMENT and not savo_reinforcement else []:
@@ -1831,12 +1849,31 @@ class IronBottomEngine:
                 if ship.position is None and ship.reinforcement_turn == state.turn and state.reinforcement_available
             }
             submitted_reinforcements = {order.ship_id for order in batch.reinforcements}
+            if len(submitted_reinforcements) != len(batch.reinforcements):
+                errors.append("Duplicate reinforcement ship order")
             if not savo_reinforcement and submitted_reinforcements != expected_reinforcements:
                 errors.append(
                     "Reinforcement orders must cover the available group; "
                     f"missing={sorted(expected_reinforcements-submitted_reinforcements)}, "
                     f"extra={sorted(submitted_reinforcements-expected_reinforcements)}"
                 )
+            if (not savo_reinforcement and not vela.enabled(state) and expected_reinforcements
+                    and submitted_reinforcements == expected_reinforcements):
+                from .data import load_scenario
+                definition = state.rule_snapshot.get("scenario") or load_scenario(state.scenario_id)
+                reinforcement_cfg = definition.get("reinforcements") or {}
+                if reinforcement_cfg.get("arrival", {}).get("formation") == "ordered_line_ahead":
+                    ids = [item["id"] for item in reinforcement_cfg["ships"]]
+                    ordered = {order.ship_id: order for order in batch.reinforcements}
+                    column = [ordered[sid] for sid in ids if sid in ordered]
+                    if len({order.heading for order in column}) != 1:
+                        errors.append("Reinforcement column must have a uniform heading")
+                    # The rule prescribes a single ordered column, not a common speed.
+                    if len(column) != len(ids) or any(
+                        column[i].entry_hex.distance(column[i + 1].entry_hex) != 1
+                        for i in range(len(column) - 1)
+                    ):
+                        errors.append("Reinforcements must enter as an ordered contiguous column")
         for order in batch.gunnery if state.phase == Phase.GUNNERY else []:
             attacker = owned.get(order.ship_id)
             if not attacker:
@@ -2078,6 +2115,11 @@ class IronBottomEngine:
         elif state.phase == Phase.REINFORCEMENT:
             if set(state.submitted_orders) != {Side.AXIS.value, Side.ALLIES.value}:
                 raise ValueError("Both sides must confirm reinforcement orders before advancing")
+            # Cross-side collisions cannot be found while either side's plan is secret.
+            # Reject before sealing or moving *any* ships; keep the orders retractable.
+            entries = [o.entry_hex.label for batch in state.submitted_orders.values() for o in batch.reinforcements]
+            if len(entries) != len(set(entries)):
+                raise ValueError("Both sides selected the same reinforcement entry hex")
             self._seal_orders(state)
             self._resolve_reinforcements(state)
             state.phase = Phase.MOVEMENT_PLANNING
@@ -2190,6 +2232,7 @@ class IronBottomEngine:
                         formation_setup=source.formation_setup if state.phase == Phase.FORMATION_SETUP else [],
                         contacts=source.contacts if state.phase == Phase.CONTACT_SETUP else [],
                         reinforcements=source.reinforcements if state.phase == Phase.REINFORCEMENT else [],
+                        reinforcement_entry_choice=source.reinforcement_entry_choice if state.phase == Phase.REINFORCEMENT else None,
                         movement=source.movement if state.phase == Phase.MOVEMENT_PLANNING else [],
                         formation_movement=source.formation_movement if state.phase == Phase.MOVEMENT_PLANNING else [],
                         contact_movement=source.contact_movement if state.phase == Phase.MOVEMENT_PLANNING else [],
@@ -2840,57 +2883,76 @@ class IronBottomEngine:
         }
 
     def _prepare_guaranteed_reinforcements(self, state: GameState) -> None:
-        from . import savo
+        """Resolve reinforcement eligibility at turn start *before* orders are sealed.
+
+        Both the offline seeded roller and LAN/RDSEED bridge intercept the same
+        engine _roll_* calls.  Do not perform a first-time roll after the players
+        have submitted their entry plans.
+        """
+        from . import savo, vela
+        if state.phase != Phase.REINFORCEMENT:
+            return
         if savo.enabled(state):
             if not state.scenario_state.get("rule_blockers"):
                 savo.prepare(self, state)
             return
-        """Source-backed automatic arrivals are known BEFORE entry orders.
-
-        Do not draw a synthetic die for a guaranteed arrival. Probabilistic
-        scenarios retain their existing timing and remain separately audited.
-        """
-        if state.phase != Phase.REINFORCEMENT or state.reinforcement_roll_done:
+        if vela.enabled(state):
+            vela.prepare(self, state)
             return
-        for entry in state_scenario_rules(state).kinds("guaranteed_reinforcement"):
-            if state.turn != int(entry["turn"]) or state.reinforcement_arrival_turn != state.turn:
-                continue
-            state.reinforcement_roll_done = True
+        if state.reinforcement_roll_done:
+            return
+        from .data import load_scenario
+        scenario = state.rule_snapshot.get("scenario") or load_scenario(state.scenario_id)
+        cfg = scenario.get("reinforcements")
+        if not cfg:
+            return
+        trigger = cfg["trigger"]
+        if state.turn != int(trigger["turn"]):
+            return
+        notation = str(trigger.get("roll", "none")).lower()
+        source_id = cfg["rule_id"]
+        page = int(scenario["source"]["pdf_page"])
+        if notation == "none" or (notation == "1d6" and set(trigger["succeeds_on"]) == set(range(1, 7))):
+            # S-05/S-06 (including older YAML copies) are guaranteed arrivals.
             state.reinforcement_available = True
-            source = entry["source"]
-            self._event(
-                state, "reinforcement_available", "想定增援按规定到达，可以计划入场（不掷骰）",
-                payload={"available": True, "arrival_turn": state.turn, "sides": entry["sides"], "automatic": True},
-                rule=self._scenario_rule(entry["id"], int(source["pdf_page"]), "想定规定增援到达"),
-            )
+            self._event(state, "reinforcement_available", "想定增援必达，无需掷骰",
+                payload={"available": True, "arrival_turn": state.reinforcement_arrival_turn, "automatic": True},
+                rule=self._scenario_rule(source_id, page, "必达增援"))
+        elif notation == "1d6":
+            raw, die = self._roll_d6(state)
+            state.reinforcement_available = raw in state.reinforcement_succeeds_on
+            self._event(state, "reinforcement_roll",
+                f"想定增援检定 {raw}：" + ("成功" if state.reinforcement_available else "失败"),
+                payload={"roll": raw, "available": state.reinforcement_available},
+                rule=self._scenario_rule(source_id, page, "一次增援检定"),
+                dice=DiceRoll(dice=[die], notation="1D6", raw=raw))
+        else:
+            raise ValueError(f"Unsupported reinforcement trigger dice: {notation}")
+        state.reinforcement_roll_done = True
 
     def _resolve_reinforcements(self, state: GameState) -> None:
-        from . import savo
+        from . import savo, vela
         if savo.enabled(state):
             savo.resolve(self, state)
             return
+        # Never roll on resolution.  In old incomplete saves this fails closed
+        # instead of silently dropping the reinforcements after both sides seal.
         if state.reinforcement_trigger_turn == state.turn and not state.reinforcement_roll_done:
-            roll, die = self._roll_d6(state)
-            state.reinforcement_roll_done = True
-            state.reinforcement_available = roll in state.reinforcement_succeeds_on
-            self._event(
-                state,
-                "reinforcement_roll",
-                f"想定增援检定 {roll}：" + ("成功" if state.reinforcement_available else "失败"),
-                payload={"roll": roll, "available": state.reinforcement_available},
-                rule=self._scenario_rule("IBS-S-01-R5", 1, "想定1增援"),
-                dice=DiceRoll(dice=[die], notation="1D6", raw=roll),
-            )
+            raise ValueError("Reinforcement roll has not been prepared at turn start")
         orders = [order for batch in self._sealed_batches(state, Phase.REINFORCEMENT) for order in batch.reinforcements]
         by_ship = {order.ship_id: order for order in orders}
         for ship in state.ships.values():
-            if ship.position is None and ship.reinforcement_turn == state.turn and ship.id in by_ship:
+            if (state.reinforcement_available and ship.position is None
+                    and ship.reinforcement_turn == state.turn and ship.id in by_ship):
                 order = by_ship[ship.id]
                 ship.position = order.entry_hex
                 ship.heading = order.heading
-                ship.current_speed = order.speed
-                ship.previous_speed = order.speed
-                self._event(state, "reinforcement_entered", f"{ship.name} 从 {order.entry_hex.label} 入场", rule=self._rule("IBS-R-05", 6, "5.0 A"))
+                ship.current_speed = ship.previous_speed = order.speed
+                self._event(state, "reinforcement_entered", f"{ship.name} 从 {order.entry_hex.label} 入场",
+                    payload={"ship_id": ship.id, "entry_hex": order.entry_hex.label},
+                    rule=self._rule("IBS-R-05", 6, "5.0 A"))
+        if vela.enabled(state):
+            vela.resolve(self, state)
 
     @staticmethod
     def _reinforcement_entry_legal(state: GameState, entry: HexCoord) -> bool:
@@ -2898,7 +2960,14 @@ class IronBottomEngine:
         end = state.reinforcement_entry_end
         if not start or not end:
             return False
-        # The printed entry boundary is the shortest hex-edge corridor between its two labelled endpoints.
+        # Printed same-row / same-column boundaries must not admit stray
+        # neighbouring rows that happen to lie on another shortest hex path.
+        sr, er, row = (p.r + p.q // 2 for p in (start, end, entry))
+        if sr == er:
+            return row == sr and min(start.q, end.q) <= entry.q <= max(start.q, end.q)
+        if start.q == end.q:
+            return entry.q == start.q and min(sr, er) <= row <= max(sr, er)
+        # The remaining diagonal source range needs the general shortest path.
         return start.distance(entry) + entry.distance(end) == start.distance(end)
 
     def _validate_contact_setup(self, state: GameState, batch: OrderBatch, errors: list[str]) -> None:

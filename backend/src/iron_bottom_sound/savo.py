@@ -59,7 +59,11 @@ def crossing(engine, state, ship, destination):
     engine._event(state, "scenario_ship_exited", f"{ship.name} 从 {previous.label} 剧本离场（未沉没）",
         payload={"ship_id": ship.id, "exit_hex": previous.label, "exit_kind": exits[ship.id]["kind"]},
         rule=engine._scenario_rule("IBS-S-10-R12" if east else "IBS-S-10-R4", 10, "离场"))
+    # Every Japanese exit can supply a legal Tulagi entry edge after two turns.
+    # Keep the earliest trigger for older saves, but don't lose later exit sites.
     state.scenario_state.setdefault("tulagi_trigger", {"turn": state.turn + data["tulagi_delay"], "position": previous.model_dump()})
+    triggers = state.scenario_state.setdefault("tulagi_triggers", [])
+    triggers.append({"ship_id": ship.id, "turn": state.turn + data["tulagi_delay"], "position": previous.model_dump()})
     return True
 
 
@@ -70,11 +74,13 @@ def prepare(engine, state):
     if state.turn < data["reinforcement_from_turn"] or state.scenario_state.get("savo_roll_turn") == state.turn:
         return
     raw, dice = engine._roll_2d6(state)
-    selected = data["reinforcement_table"][str(raw)]
+    table = data["reinforcement_table"]
+    selected = table[str(raw)] if str(raw) in table else table[raw]
     arrived = state.scenario_state.get("savo_arrived_groups", [])
     groups = [g for g in selected if g not in arrived]
-    trigger = state.scenario_state.get("tulagi_trigger")
-    if trigger and state.turn >= trigger["turn"] and "tulagi" not in arrived:
+    triggers = state.scenario_state.get("tulagi_triggers") or (
+        [state.scenario_state["tulagi_trigger"]] if state.scenario_state.get("tulagi_trigger") else [])
+    if any(state.turn >= t["turn"] for t in triggers) and "tulagi" not in arrived:
         groups.append("tulagi")
     state.scenario_state.update(savo_available_groups=groups, savo_roll_turn=state.turn)
     for group in groups:
@@ -94,8 +100,11 @@ def candidates(engine, state, side):
         for group in state.scenario_state.get("savo_available_groups", []):
             info = data["reinforcement_groups"][group]
             if group == "tulagi":
-                center = HexCoord.model_validate(state.scenario_state["tulagi_trigger"]["position"])
-                entries = [p for p in disc(state, center, data["tulagi_radius"]) if edge(state, p)]
+                triggers = state.scenario_state.get("tulagi_triggers") or (
+                    [state.scenario_state["tulagi_trigger"]] if state.scenario_state.get("tulagi_trigger") else [])
+                entries = list({p.label: p for t in triggers if state.turn >= t["turn"]
+                    for p in disc(state, HexCoord.model_validate(t["position"]), data["tulagi_radius"])
+                    if edge(state, p)}.values())
             else:
                 start, end = [HexCoord.from_label(h) for h in info["entry"]]
                 entries = engine._hex_line(start, end)
@@ -104,7 +113,8 @@ def candidates(engine, state, side):
                     ship = state.ships[sid]
                     rows.append({"ship_id": sid, "name": ship.name, "asset": ship.asset, "group": group,
                         "max_speed": ship.max_speed_for_turn(state.turn), "mandatory": True,
-                        "entry_hexes": [p.label for p in entries if p.label not in occupied and p.label not in state.land_hexes]})
+                        "entry_hexes": [p.label for p in entries if p.label not in occupied
+                                         and not engine._terrain_impassable(state, p)]})
     else:
         for sid, item in state.scenario_state.get("savo_exits", {}).items():
             ship = state.ships[sid]
@@ -112,7 +122,8 @@ def candidates(engine, state, side):
                 continue
             entries = [p for p in disc(state, HexCoord.model_validate(item["position"]), data["return_radius"]) if edge(state, p)]
             rows.append({"ship_id": sid, "name": ship.name, "asset": ship.asset, "mandatory": False,
-                "max_speed": ship.max_speed_for_turn(state.turn), "entry_hexes": [p.label for p in entries if p.label not in occupied and p.label not in state.land_hexes]})
+                "max_speed": ship.max_speed_for_turn(state.turn), "entry_hexes": [p.label for p in entries if p.label not in occupied
+                                         and not engine._terrain_impassable(state, p)]})
     return rows
 
 
@@ -123,6 +134,8 @@ def validate(engine, state, batch):
     required = {sid for sid,r in rows.items() if r["mandatory"]}
     if not required <= submitted:
         errors.append("须部署本回合获准增援组全部舰只")
+    if len(submitted) != len(batch.reinforcements):
+        errors.append("萨沃岛增援舰不能重复提交")
     for order in batch.reinforcements:
         row = rows.get(order.ship_id)
         if not row or order.entry_hex.label not in row["entry_hexes"] or order.speed > row["max_speed"]:
@@ -137,8 +150,10 @@ def validate(engine, state, batch):
         else:
             # Check connectivity and collinearity without imposing a leader identity.
             labels = {o.entry_hex.label for o in orders}
-            chain = engine._hex_line(min((o.entry_hex for o in orders), key=lambda p:p.r), max((o.entry_hex for o in orders), key=lambda p:p.r))
-            if len(chain) != len(orders) or {p.label for p in chain} != labels:
+            # Eastern entry is a printed HH-column; sort by printed row.
+            column = sorted((o.entry_hex for o in orders), key=lambda p:p.r + p.q // 2)
+            if (len({p.q for p in column}) != 1 or
+                    any(a.distance(b) != 1 for a,b in zip(column, column[1:]))):
                 errors.append("东方部队必须连续占据单纵队格子")
     return errors
 

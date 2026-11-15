@@ -67,6 +67,7 @@ ships:
   - {id: IBS-U-USN-MCCALLA, name: 麦卡拉, side: allies, template: dd-american-1942, position: AA12, heading: 4, speed: 3, asset: 美国-DD-麦卡拉.png}
   - {id: IBS-U-USN-DUNCAN, name: 邓肯, side: allies, template: dd-american-1942, position: X8, heading: 4, speed: 5, asset: 美国-DD-邓肯.png}
 reinforcements:
+  rule_id: IBS-S-01-R5
   trigger: {turn: 3, roll: 1d6, succeeds_on: [1]}
   arrival: {turn: 4, timing: before_movement_planning, entry_hex_range: [E17, U27], speed: any_legal}
   ships:

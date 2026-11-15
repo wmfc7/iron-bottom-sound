@@ -10,7 +10,7 @@ source: {document: scenario-book-zh.pdf, pdf_page: 14, printed_page: 15, status:
 turns: 11
 visibility: {axis: 24, allies: 20}
 optional_rules: [radar]
-available_optional_rules: [hidden_contacts, radar, star_shells, searchlights, malfunction_66, squalls, smoke, silhouettes, hidden_damage, blind_torpedoes]
+available_optional_rules: [hidden_contacts, radar, star_shells, searchlights, malfunction_66, squalls, smoke, silhouettes, hidden_damage, blind_torpedoes, s13_axis_apd_reinforcements]
 setup:
   mode: scenario_positions
   engine_default_note: engine_default_formations 仅为真实模式直接开局的默认编队提案；部署权威仍是 ships 初始位置与想定规则。
@@ -29,9 +29,6 @@ setup:
       ships:
       - IBS-U-IJN-SHIGURE
       - IBS-U-IJN-SAMIDARE
-      - IBS-U-IJN-YUNAGI
-      - IBS-U-IJN-FUMIZUKI
-      - IBS-U-IJN-MATSU-KAZE
       note: 韦拉拉韦拉输送队（西村祥治少将旗舰时雨）
     allies:
     - id: allies-desdiv
@@ -69,21 +66,35 @@ ships:
   - {id: IBS-U-IJN-YUGUMO, name: 夕云, side: axis, template: dd-japanese-1942, position: I14, heading: 2, speed: 4, asset: 日本-DD-夕云.png}
   - {id: IBS-U-IJN-SHIGURE, name: 时雨, side: axis, template: dd-japanese-1942, position: E5, heading: 3, speed: 5, asset: 日本-DD-时雨.png}
   - {id: IBS-U-IJN-SAMIDARE, name: 五月雨, side: axis, template: dd-japanese-1942, position: E4, heading: 3, speed: 5, asset: 日本-DD-五月雨.png}
-  # 可选援军（页面“可选援军”框，是否上场由 IBS-S-13-R3 可选增援规则决定）
-  - {id: IBS-U-IJN-YUNAGI, name: 夕凪, side: axis, template: dd-japanese-1942, position: E3, heading: 3, speed: 5, asset: 日本-APD-夕凪.png}
-  - {id: IBS-U-IJN-FUMIZUKI, name: 文月, side: axis, template: dd-japanese-1942, position: E2, heading: 3, speed: 5, asset: 日本-APD-文月.png}
-  - {id: IBS-U-IJN-MATSU-KAZE, name: 松风, side: axis, template: dd-japanese-1942, position: E1, heading: 3, speed: 5, asset: 日本-APD-松风.png}
   # 盟军舰队 配置（旗舰：赛尔弗里纪 —— 弗兰克·R·沃克上校）援军
   # 页面/棋子印“赛尔弗里纪”，record-ids 作“赛尔弗里奇”（SELFRIDGE），取 record id
   - {id: IBS-U-USN-SELFRIDGE, name: 赛尔弗里纪, side: allies, template: dd-american-1942, position: Z7, heading: 4, speed: 5, asset: 美国-DD-赛尔弗里纪.png, flagship: true}
   - {id: IBS-U-USN-CHEVALIER, name: 谢伐利埃, side: allies, template: dd-american-1942, position: AA7, heading: 4, speed: 5, asset: 美国-DD-谢伐利埃.png}
   - {id: IBS-U-USN-OBANNON, name: 奥班农, side: allies, template: dd-american-1942, position: BB6, heading: 4, speed: 5, asset: 美国-DD-奥班农.png}
+# R3 optional APD deployment; default scenario does not deploy them.
+optional_reinforcements:
+  rule_id: IBS-S-13-R3
+  option: s13_axis_apd_reinforcements
+  ships:
+  - {id: IBS-U-IJN-YUNAGI, name: 夕凪, side: axis, template: dd-japanese-1942, position: E3, heading: 3, speed: 5, asset: 日本-APD-夕凪.png}
+  - {id: IBS-U-IJN-FUMIZUKI, name: 文月, side: axis, template: dd-japanese-1942, position: E2, heading: 3, speed: 5, asset: 日本-APD-文月.png}
+  - {id: IBS-U-IJN-MATSU-KAZE, name: 松风, side: axis, template: dd-japanese-1942, position: E1, heading: 3, speed: 5, asset: 日本-APD-松风.png}
 reinforcements:
-  # 原文机制=第2回合起每回合开始掷2d6（10-11 成功；采用可选增援时 9-12），直到第8回合开始自动进场（IBS-S-13-R2/R3）。
-  # 引擎只支持单次 1d6 触发，无法表达逐回合重掷；按治理仅结构化规则保证的“第8回合自动进场”，
-  # 更早的掷骰入场仍以 R2/R3 原文为准（由玩家自行执行）。
-  trigger: {turn: 7, roll: 1d6, succeeds_on: [1, 2, 3, 4, 5, 6]}
-  arrival: {turn: 8, entry_hex_range: [L27, V27], speed: any_legal}
+  rule_id: IBS-S-13-R2
+  trigger:
+    from_turn: 2
+    through_turn: 7
+    roll: 2d6
+    succeeds_on: [10, 11]
+    optional_succeeds_on: [9, 10, 11, 12]
+    guaranteed_turn: 8
+  arrival:
+    turn: 8  # default/guaranteed; successful earlier roll updates the live turn
+    timing: before_movement_planning
+    entry_hex_range: [L27, V27]
+    speed: 5
+    formation: line_ahead
+    secret_entry: true
   ships:
     - {id: IBS-U-USN-RALPH-TALBOT, name: 拉尔夫·托尔伯特, side: allies, template: dd-american-1942, speed_track: [5, 5, 5], asset: 美国-DD-拉尔夫·托尔伯特.png}
     - {id: IBS-U-USN-TAYLOR, name: 泰勒, side: allies, template: dd-american-1942, speed_track: [5, 5, 5], asset: 美国-DD-泰勒.png}

@@ -70,6 +70,26 @@ def _identify_roll(notation: str, state: Any) -> dict:
         while stack:
             name = stack.f_code.co_name
             loc = stack.f_locals
+            if name == '_prepare_guaranteed_reinforcements' and notation == '1D6':
+                from iron_bottom_sound.data import load_scenario
+                definition = state.rule_snapshot.get('scenario') or load_scenario(state.scenario_id)
+                cfg = definition.get('reinforcements') or {}
+                options = set(cfg.get('trigger', {}).get('succeeds_on', []))
+                side = cfg.get('ships', [{}])[0].get('side', 'axis')
+                return {'owner': side, 'reason': '想定增援检定',
+                        'detail': str(cfg.get('rule_id', '增援规则')) + ' · 回合开始时掷1D6',
+                        'rule': _rule([{'key':str(v),'value': '入场' if v in options else '未到达'}
+                                       for v in range(1,7)],'想定增援 · ' + str(cfg.get('rule_id', '')))}
+            if name == 'prepare' and stack.f_code.co_filename.replace('\\', '/').endswith('/vela.py'):
+                from iron_bottom_sound.vela import rules as vela_rules
+                cfg = vela_rules(state)['trigger']
+                successes = (cfg['optional_succeeds_on'] if state.options.optional_rules.s13_axis_apd_reinforcements
+                             else cfg['succeeds_on'])
+                return {'owner': 'allies', 'reason': '韦拉拉韦拉增援判定',
+                        'detail': '第2至7回合逐回合2D6；第8回合必达',
+                        'rule': _rule([{'key': str(v), 'value': ('增援成功' if v in successes else '未到达')}
+                                       for v in range(2, 13)],
+                                      '韦拉拉韦拉增援 · IBS-S-13-R2/R3', '采用日军可选APD时成功点数扩大为9–12')}
             if name == 'prepare' and stack.f_code.co_filename.replace('\\', '/').endswith('/savo.py'):
                 data = loc.get('data', {})
                 choices = data.get('reinforcement_table', {}) if isinstance(data, dict) else {}

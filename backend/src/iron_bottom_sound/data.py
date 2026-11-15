@@ -235,6 +235,11 @@ def build_initial_state(game_id: str, scenario_id: str, seed: int, options: Game
     templates = load_templates()
     records = load_ship_records()
     entries = list(scenario["ships"])
+    optional = scenario.get("optional_reinforcements")
+    if options.optional_rules.s13_axis_apd_reinforcements:
+        if scenario_id != "IBS-S-13" or not optional or optional.get("option") != "s13_axis_apd_reinforcements":
+            raise ValueError("S-13 optional APD rule may only be enabled for scenario 13")
+        entries.extend(optional["ships"])
     reinforcement = scenario.get("reinforcements")
     if reinforcement:
         arrival_turn = int(reinforcement["arrival"]["turn"])
@@ -259,9 +264,12 @@ def build_initial_state(game_id: str, scenario_id: str, seed: int, options: Game
         printed_rows=printed_rows,
     )
     if reinforcement:
-        state.reinforcement_trigger_turn = int(reinforcement["trigger"]["turn"])
+        trigger = reinforcement["trigger"]
+        state.reinforcement_trigger_turn = int(trigger.get("turn", trigger.get("from_turn", 0)))
         state.reinforcement_arrival_turn = int(reinforcement["arrival"]["turn"])
-        state.reinforcement_succeeds_on = tuple(int(value) for value in reinforcement["trigger"]["succeeds_on"])
+        success_values = (trigger["optional_succeeds_on"] if options.optional_rules.s13_axis_apd_reinforcements
+                          and "optional_succeeds_on" in trigger else trigger["succeeds_on"])
+        state.reinforcement_succeeds_on = tuple(int(value) for value in success_values)
         start, end = reinforcement["arrival"]["entry_hex_range"]
         state.reinforcement_entry_start = HexCoord.from_label(start)
         state.reinforcement_entry_end = HexCoord.from_label(end)

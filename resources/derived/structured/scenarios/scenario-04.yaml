@@ -116,8 +116,9 @@ ships:
   - {id: IBS-U-USN-LAMSON, name: 拉姆森, side: allies, template: dd-american-1942, position: FF17, heading: 5, speed: 4, asset: 美国-DD-拉姆森.png}
   - {id: IBS-U-USN-LARDNER, name: 拉德纳, side: allies, template: dd-american-1942, position: GG18, heading: 5, speed: 4, asset: 美国-DD-拉德纳.png}
 reinforcements:
+  rule_id: IBS-S-04-R6
   trigger: {turn: 4, roll: 1d6, succeeds_on: [1, 2]}
-  arrival: {turn: 4, timing: during_movement, entry_hex_range: [G27, O27], speed: any_legal}  # 页面原文：增援单位在移动阶段入场
+  arrival: {turn: 4, timing: during_movement, entry_hex_range: [G27, O27], speed: any_legal, formation: ordered_line_ahead}  # 页面原文：增援单位在移动阶段入场
   ships:
     - {id: IBS-U-IJN-HAMAKAZE, name: 浜风, side: axis, template: dd-japanese-1942, torpedo_reloads: 0, asset: 日本-DD-浜风.png}
     - {id: IBS-U-IJN-MONCHIZUKI, name: 望月, side: axis, template: dd-japanese-1942, asset: 日本-APD-望月.png}

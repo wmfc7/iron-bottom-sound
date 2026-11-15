@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>铁底湾 · 联机大厅选择阵营</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,'Microsoft YaHei',sans-serif;background:#0b1724;color:#eff6fc}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}
+main{width:min(680px,100%);background:#142638;border:1px solid #34516b;border-radius:14px;padding:28px}
+h1{font-size:1.7rem;margin:0 0 8px}p{color:#afc5d6;line-height:1.6}
+#seats{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:20px}
+button{padding:23px 14px;border:1px solid #538bb0;border-radius:10px;background:#1b5275;color:#fff;font:600 19px system-ui;cursor:pointer}
+button:disabled{background:#23313c;color:#aab6bf;cursor:not-allowed;border-color:#506170}
+#error{color:#ffb8a8;white-space:pre-wrap}small{color:#a3b6c6}
+@media(max-width:490px){#seats{grid-template-columns:1fr}}
+</style></head><body><main>
+<h1>铁底湾的回响 IV · 联机大厅</h1>
+<p>请选择本局使用的阵营。每个阵营仅能由一个浏览器认领，进入后与另一名玩家共享剧本、准备状态及存档。</p>
+<p id="status">验证共享入口……</p><div id="seats" hidden>
+<button id="axis" disabled>轴心国</button><button id="allies" disabled>同盟国</button></div>
+<p id="error" role="alert"></p><small>同一 EasyTier 网络可通过“自动寻找联机大厅”直接进入；也继续支持房主的私有邀请。请用同一浏览器恢复座位。</small>
+</main><script>
+'use strict';
+const $=id=>document.getElementById(id);
+async function call(path,method='GET',data){
+ const r=await fetch(path,{method,cache:'no-store',headers:data?{'Content-Type':'application/json'}:{},body:data?JSON.stringify(data):undefined});
+ const j=await r.json();if(!r.ok)throw Error(j.detail||'请求失败');return j;
+}
+async function refresh(){
+ const s=await call('/lan/seat/state');
+ for(const side of ['axis','allies']){$(side).disabled=!!s.occupied[side]&&s.mine!==side;
+   $(side).textContent=(side==='axis'?'轴心国':'同盟国')+(s.mine===side?' · 已认领':s.occupied[side]?' · 已被认领':' · 选择');}
+ $('status').textContent=s.mine?'点击已认领的阵营，恢复进入大厅。':'选择一个空闲阵营进入准备大厅。';$('seats').hidden=false;
+}
+async function claim(side){
+ $('error').textContent='';$('axis').disabled=true;$('allies').disabled=true;
+ try{const s=await call('/lan/seat/claim','POST',{side});location.replace(s.redirect)}
+ catch(e){$('error').textContent=String(e);await refresh().catch(()=>{})}
+}
+$('axis').onclick=()=>claim('axis');$('allies').onclick=()=>claim('allies');
+(async()=>{try{
+ const ticket=decodeURIComponent(location.hash.slice(1));
+ const auto=new URLSearchParams(location.search).get('autojoin')==='1';
+ if(ticket){history.replaceState(null,'','/lan/seat');await call('/lan/entry','POST',{ticket});}
+ else if(auto){history.replaceState(null,'','/lan/seat');await call('/lan/auto-entry','POST');}
+ await refresh();
+}catch(e){$('status').textContent='无法进入房间';$('error').textContent=String(e)}})();
+</script></body></html>

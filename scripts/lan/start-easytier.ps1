@@ -190,6 +190,20 @@ foreach ($oldPort in @(8000, 5173)) {
 }
 $env:IBS_DICE_SOURCE = $DiceMode
 $env:IBS_LAN_ADVERTISE_IP = $address
+# Automatic room discovery is opt-in and only exposed via the bound EasyTier IP.
+# Restrict discovery and auto-entry to clients in this virtual interface's IPv4 subnet.
+$vpnAddress = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
+    $_.IPAddress -eq $address -and $_.AddressState -eq 'Preferred'
+}) | Select-Object -First 1
+if (-not $vpnAddress) { throw 'EasyTier virtual interface IPv4 prefix not found.' }
+$prefix = [int]$vpnAddress.PrefixLength
+if ($prefix -lt 8 -or $prefix -gt 32) { throw 'Invalid EasyTier IPv4 network prefix.' }
+# /32 point-to-point TUN addresses have no directly reachable peer subnet;
+# use the conventional /24 EasyTier range for the autojoin access boundary.
+if ($prefix -gt 24) { $prefix = 24 }
+$env:IBS_LAN_AUTOFIND = '1'
+$env:IBS_LAN_AUTOFIND_CIDR = "$address/$prefix"
+Write-Host ('Auto-discovery enabled on EasyTier subnet: ' + $env:IBS_LAN_AUTOFIND_CIDR)
 $serverArgs = @('lan_server.py', '--host', $address, '--port', [string]$Port)
 if ($Mode -eq 'NewRoom') {
     Write-Warning 'Creating a NEW room rotates all invitation tickets. Saved games are not deleted.'
