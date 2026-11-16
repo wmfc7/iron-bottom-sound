@@ -1,4 +1,4 @@
-# Restores the original standalone launcher after project organization.
+﻿# Restores the original standalone launcher after project organization.
 # Standalone mode only binds to 127.0.0.1, never to EasyTier or public interfaces.
 param([switch]$RestartBackend, [switch]$NoBrowser)
 if ($env:IBS_LAUNCHER_UTF8 -eq '1') { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) }
@@ -18,6 +18,39 @@ foreach ($entry in @(@(8000, 'backend'), @(5173, 'frontend'))) {
     }
 }
 Save-GameProcesses $Backend $Frontend
+# Only browser-launched solo mode is automatically monitored. -NoBrowser preserves
+# the original manual stop behavior (useful for development or headless runs).
+$AutoStopEnabled = -not $NoBrowser
+$SoloSessionFile = Join-Path $RuntimeDir 'solo-session.txt'
+$SoloPresenceFile = Join-Path $RuntimeDir 'solo-presence.json'
+$SoloSessionId = $null
+if (-not $AutoStopEnabled) {
+    # A manual/headless start cancels a lingering watcher from an earlier run.
+    Remove-Item -LiteralPath $SoloSessionFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $SoloPresenceFile -Force -ErrorAction SilentlyContinue
+}
+if ($AutoStopEnabled) {
+    $SoloSessionId = [guid]::NewGuid().ToString('N')
+    # Invalidate any watcher from a previous launch before touching its processes.
+    Set-Content -LiteralPath $SoloSessionFile -Value $SoloSessionId -Encoding ASCII
+    Remove-Item -LiteralPath $SoloPresenceFile -Force -ErrorAction SilentlyContinue
+    # A reused Vite server was started without this session token; restart only
+    # a frontend already verified as belonging to THIS project.
+    if ($null -ne $Frontend) {
+        Write-Host 'Restarting the project frontend for browser-close monitoring.'
+        Stop-GameProcess $Frontend
+        $Frontend = $null
+        Save-GameProcesses $Backend $null
+        for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
+            if (-not (Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        if (Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue) {
+            throw 'Frontend port 5173 was not released; cannot safely enable browser monitoring.'
+        }
+    }
+    $env:IBS_SOLO_MONITOR_ID = $SoloSessionId
+}
 if ($null -ne $Backend) {
     $Fresh = $false
     try { $health = Invoke-RestMethod 'http://127.0.0.1:8000/health' -TimeoutSec 2; $Fresh = $health.status -eq 'ready' } catch { }
@@ -65,6 +98,27 @@ for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
     Start-Sleep -Milliseconds 500
 }
 if (-not $Ready) { throw "Game did not become ready. See logs in $RuntimeDir." }
-if (-not $NoBrowser) { Start-Process 'http://127.0.0.1:5173' }
+if ($AutoStopEnabled) {
+    # Independent hidden watchdog: closing the .bat console does not leave a
+    # permanent server behind. It invokes the EXISTING verified stop-game.ps1.
+    $WatcherScript = Join-Path $PSScriptRoot 'Watch-SoloBrowser.ps1'
+    if (-not (Test-Path -LiteralPath $WatcherScript)) {
+        & (Join-Path $PSScriptRoot 'stop-game.ps1')
+        throw 'Missing Watch-SoloBrowser.ps1; game services stopped to avoid orphan processes.'
+    }
+    try {
+        $Watcher = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+            '-File', ('"' + $WatcherScript + '"'), '-Session', $SoloSessionId
+        ) -WindowStyle Hidden -PassThru -ErrorAction Stop
+        if ($null -eq $Watcher) { throw 'Watchdog did not start.' }
+        Start-Process 'http://127.0.0.1:5173' -ErrorAction Stop
+        Write-Host 'Auto-stop enabled: close all solo game tabs to stop backend and frontend.'
+        Write-Host 'Normal close: ~6-10 sec. Browser crash fallback: up to ~150 sec.'
+    } catch {
+        & (Join-Path $PSScriptRoot 'stop-game.ps1')
+        throw
+    }
+}
 Write-Host 'Iron Bottom Sound SOLO mode ready: http://127.0.0.1:5173'
 Write-Host 'Saved games are preserved; solo back-end binds only loopback.'

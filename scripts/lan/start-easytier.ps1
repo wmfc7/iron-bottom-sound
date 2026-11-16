@@ -149,7 +149,7 @@ function Start-EasyTierIfRequested {
     if (-not $ready) { throw 'EasyTier did not create a usable virtual adapter. Check core logs, permissions, TUN driver and config.' }
 }
 
-if ($Mode -ne 'Join' -and -not (Test-Path -LiteralPath (Join-Path $root 'lan_server.py') -PathType Leaf)) {
+if ($Mode -ne 'Join' -and -not (Test-Path -LiteralPath (Join-Path $root 'lan\lan_server.py') -PathType Leaf)) {
     throw 'Game root not found (lan_server.py missing).'
 }
 Start-EasyTierIfRequested
@@ -176,7 +176,7 @@ if ($Mode -eq 'Join') {
 if (-not (Test-Path -LiteralPath (Join-Path $root 'frontend\dist\index.html') -PathType Leaf)) {
     throw 'frontend/dist/index.html missing. Run: cd frontend; pnpm.cmd install; pnpm.cmd run build'
 }
-if ($DiceMode -eq 'cpu_rdseed' -and -not (Test-Path -LiteralPath (Join-Path $root 'ibs_cpu_rng.dll') -PathType Leaf)) {
+if ($DiceMode -eq 'cpu_rdseed' -and -not (Test-Path -LiteralPath (Join-Path $root 'CPU-RNG\ibs_cpu_rng.dll') -PathType Leaf)) {
     throw 'ibs_cpu_rng.dll missing. RDSEED mode cannot silently fall back.'
 }
 $address = Resolve-EasyTierAddress
@@ -204,7 +204,9 @@ if ($prefix -gt 24) { $prefix = 24 }
 $env:IBS_LAN_AUTOFIND = '1'
 $env:IBS_LAN_AUTOFIND_CIDR = "$address/$prefix"
 Write-Host ('Auto-discovery enabled on EasyTier subnet: ' + $env:IBS_LAN_AUTOFIND_CIDR)
-$serverArgs = @('lan_server.py', '--host', $address, '--port', [string]$Port)
+$env:IBS_ROOT = $root
+$env:IBS_DICE_CPU_DLL = Join-Path $root 'CPU-RNG\ibs_cpu_rng.dll'
+$serverArgs = @((Join-Path $root 'lan\lan_server.py'), '--host', $address, '--port', [string]$Port)
 if ($Mode -eq 'NewRoom') {
     Write-Warning 'Creating a NEW room rotates all invitation tickets. Saved games are not deleted.'
     $serverArgs += @('--new-room', '--scenario', $Scenario)

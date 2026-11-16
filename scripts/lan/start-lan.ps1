@@ -1,4 +1,4 @@
-# PowerShell 5.1+, central launcher for the LAN duel gateway.
+﻿# PowerShell 5.1+, central launcher for the LAN duel gateway.
 # This script never deletes a room, database, audit file, or checkpoint.
 [CmdletBinding()]
 param(
@@ -11,16 +11,18 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-if (-not (Test-Path -LiteralPath (Join-Path $root 'lan_server.py') -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath (Join-Path $root 'lan\lan_server.py') -PathType Leaf)) {
     throw 'Cannot find lan_server.py; wrong installation location.'
 }
 if ($Mode -ne 'inherit') {
     $env:IBS_DICE_SOURCE = $Mode
 }
-if ($Mode -eq 'cpu_rdseed' -and -not (Test-Path -LiteralPath (Join-Path $root 'ibs_cpu_rng.dll') -PathType Leaf)) {
+if ($Mode -eq 'cpu_rdseed' -and -not (Test-Path -LiteralPath (Join-Path $root 'CPU-RNG\ibs_cpu_rng.dll') -PathType Leaf)) {
     throw 'RDSEED DLL is missing. Build ibs_cpu_rng.dll first; no silent RNG fallback.'
 }
-$argsList = @('lan_server.py', '--host', $HostAddress, '--port', [string]$Port)
+$env:IBS_ROOT = $root
+$env:IBS_DICE_CPU_DLL = Join-Path $root 'CPU-RNG\ibs_cpu_rng.dll'
+$argsList = @((Join-Path $root 'lan\lan_server.py'), '--host', $HostAddress, '--port', [string]$Port)
 if ($NewRoom) {
     Write-Warning 'NewRoom rotates room tickets. Make sure both players are ready for a new room.'
     $argsList += @('--new-room', '--scenario', $Scenario)
